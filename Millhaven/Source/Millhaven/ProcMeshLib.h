@@ -6,13 +6,26 @@
  * Accumulates flat-shaded low-poly geometry. Every triangle gets its own
  * three vertices with a single face normal, which is what produces the
  * faceted "low poly" look (equivalent of flatShading in Three.js).
+ *
+ * NOTE: deliberately NOT called FMeshBatch - the engine already declares a
+ * global FMeshBatch in SceneManagement.h/MeshBatch.h, which the Engine shared
+ * PCH pulls in. A second global FMeshBatch is a redefinition error.
  */
-struct FMeshBatch
+struct FMillhavenMeshBatch
 {
 	TArray<FVector> V;
 	TArray<int32> T;
 	TArray<FVector> N;
 	TArray<FVector2D> UV;
+
+	/** Pre-size the arrays for an expected triangle count (pure optimisation). */
+	void ReserveTriangles(int32 TriCount)
+	{
+		V.Reserve(V.Num() + TriCount * 3);
+		N.Reserve(N.Num() + TriCount * 3);
+		UV.Reserve(UV.Num() + TriCount * 3);
+		T.Reserve(T.Num() + TriCount * 3);
+	}
 
 	void AddTriangle(const FVector& A, const FVector& B, const FVector& C)
 	{
@@ -38,11 +51,12 @@ struct FMeshBatch
 		auto P = [&](int32 SX, int32 SY, int32 SZ)
 		{
 			const FVector Local(
-				Size.X * 0.5f * (SX ? 1.f : -1.f),
-				Size.Y * 0.5f * (SY ? 1.f : -1.f),
-				Size.Z * 0.5f * (SZ ? 1.f : -1.f));
+				Size.X * 0.5 * (SX ? 1.0 : -1.0),
+				Size.Y * 0.5 * (SY ? 1.0 : -1.0),
+				Size.Z * 0.5 * (SZ ? 1.0 : -1.0));
 			return Center + Rot.RotateVector(Local);
 		};
+		ReserveTriangles(12);
 		// +Z (top)
 		AddQuad(P(0,0,1), P(1,0,1), P(1,1,1), P(0,1,1));
 		// -Z (bottom)
@@ -60,13 +74,15 @@ struct FMeshBatch
 	// Cone: BaseCenter at the bottom, apex straight up. StartDeg rotates the ring.
 	void AddCone(const FVector& BaseCenter, float Radius, float Height, int32 Sides, float StartDeg = 0.f)
 	{
-		const FVector Apex = BaseCenter + FVector(0, 0, Height);
+		Sides = FMath::Max(3, Sides);
+		const FVector Apex = BaseCenter + FVector(0.0, 0.0, (double)Height);
+		ReserveTriangles(Sides * 2);
 		for (int32 i = 0; i < Sides; i++)
 		{
 			const float A0 = FMath::DegreesToRadians(StartDeg + (360.f * i) / Sides);
 			const float A1 = FMath::DegreesToRadians(StartDeg + (360.f * (i + 1)) / Sides);
-			const FVector P0 = BaseCenter + FVector(FMath::Cos(A0) * Radius, FMath::Sin(A0) * Radius, 0);
-			const FVector P1 = BaseCenter + FVector(FMath::Cos(A1) * Radius, FMath::Sin(A1) * Radius, 0);
+			const FVector P0 = BaseCenter + FVector(FMath::Cos(A0) * Radius, FMath::Sin(A0) * Radius, 0.f);
+			const FVector P1 = BaseCenter + FVector(FMath::Cos(A1) * Radius, FMath::Sin(A1) * Radius, 0.f);
 			AddTriangle(P0, P1, Apex);          // side (outward)
 			AddTriangle(BaseCenter, P1, P0);    // base cap (faces down)
 		}
@@ -75,15 +91,17 @@ struct FMeshBatch
 	// Cylinder / tapered cylinder. R0 = bottom radius, R1 = top radius.
 	void AddCylinder(const FVector& BaseCenter, float R0, float R1, float Height, int32 Sides)
 	{
-		const FVector TopCenter = BaseCenter + FVector(0, 0, Height);
+		Sides = FMath::Max(3, Sides);
+		const FVector TopCenter = BaseCenter + FVector(0.0, 0.0, (double)Height);
+		ReserveTriangles(Sides * 4);
 		for (int32 i = 0; i < Sides; i++)
 		{
 			const float A0 = (2.f * PI * i) / Sides;
 			const float A1 = (2.f * PI * (i + 1)) / Sides;
-			const FVector B0 = BaseCenter + FVector(FMath::Cos(A0) * R0, FMath::Sin(A0) * R0, 0);
-			const FVector B1 = BaseCenter + FVector(FMath::Cos(A1) * R0, FMath::Sin(A1) * R0, 0);
-			const FVector T0 = TopCenter + FVector(FMath::Cos(A0) * R1, FMath::Sin(A0) * R1, 0);
-			const FVector T1 = TopCenter + FVector(FMath::Cos(A1) * R1, FMath::Sin(A1) * R1, 0);
+			const FVector B0 = BaseCenter + FVector(FMath::Cos(A0) * R0, FMath::Sin(A0) * R0, 0.f);
+			const FVector B1 = BaseCenter + FVector(FMath::Cos(A1) * R0, FMath::Sin(A1) * R0, 0.f);
+			const FVector T0 = TopCenter + FVector(FMath::Cos(A0) * R1, FMath::Sin(A0) * R1, 0.f);
+			const FVector T1 = TopCenter + FVector(FMath::Cos(A1) * R1, FMath::Sin(A1) * R1, 0.f);
 			AddQuad(B0, B1, T1, T0);            // side
 			AddTriangle(TopCenter, T0, T1);     // top cap (up)
 			AddTriangle(BaseCenter, B1, B0);    // bottom cap (down)
@@ -93,22 +111,22 @@ struct FMeshBatch
 	// Horizontal, upward-facing rectangle (paths, water).
 	void AddHQuad(const FVector& Center, float SizeX, float SizeY)
 	{
-		const float HX = SizeX * 0.5f, HY = SizeY * 0.5f;
+		const double HX = SizeX * 0.5, HY = SizeY * 0.5;
 		AddQuad(
-			Center + FVector(-HX, -HY, 0),
-			Center + FVector( HX, -HY, 0),
-			Center + FVector( HX,  HY, 0),
-			Center + FVector(-HX,  HY, 0));
+			Center + FVector(-HX, -HY, 0.0),
+			Center + FVector( HX, -HY, 0.0),
+			Center + FVector( HX,  HY, 0.0),
+			Center + FVector(-HX,  HY, 0.0));
 	}
 
 	// Vertical rectangle facing +Y (or both ways if bTwoSided).
 	void AddVQuadFacingY(const FVector& Center, float SizeX, float SizeZ, bool bTwoSided = false)
 	{
-		const float HX = SizeX * 0.5f, HZ = SizeZ * 0.5f;
-		const FVector BL = Center + FVector(-HX, 0, -HZ);
-		const FVector TL = Center + FVector(-HX, 0,  HZ);
-		const FVector TR = Center + FVector( HX, 0,  HZ);
-		const FVector BR = Center + FVector( HX, 0, -HZ);
+		const double HX = SizeX * 0.5, HZ = SizeZ * 0.5;
+		const FVector BL = Center + FVector(-HX, 0.0, -HZ);
+		const FVector TL = Center + FVector(-HX, 0.0,  HZ);
+		const FVector TR = Center + FVector( HX, 0.0,  HZ);
+		const FVector BR = Center + FVector( HX, 0.0, -HZ);
 		AddQuad(BL, TL, TR, BR); // normal +Y
 		if (bTwoSided)
 		{

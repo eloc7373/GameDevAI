@@ -10,6 +10,7 @@ class UDirectionalLightComponent;
 class USkyLightComponent;
 class USkyAtmosphereComponent;
 class UExponentialHeightFogComponent;
+class UMaterialInterface;
 class UMaterialInstanceDynamic;
 
 /**
@@ -36,6 +37,9 @@ public:
 	/** Region name for the HUD location banner. */
 	static FString BiomeAt(float WX, float WY);
 
+	/** True once the world geometry has been generated. */
+	bool IsWorldBuilt() const { return bWorldBuilt; }
+
 protected:
 	virtual void BeginPlay() override;
 
@@ -51,14 +55,20 @@ protected:
 	UPROPERTY() USkyAtmosphereComponent* Atmosphere = nullptr;
 	UPROPERTY() UExponentialHeightFogComponent* Fog = nullptr;
 
+	/** Cached so the engine material is not re-resolved (and stays GC-rooted). */
+	UPROPERTY() UMaterialInterface* BaseMaterial = nullptr;
 	UPROPERTY() TArray<UMaterialInstanceDynamic*> MIDs;
 
 	// Color-batched geometry
-	TArray<TPair<FColor, FMeshBatch>> Batches;
-	FMeshBatch& B(const FColor& Color);
+	TArray<TPair<FColor, FMillhavenMeshBatch>> Batches;
+	FMillhavenMeshBatch& B(const FColor& Color);
 	void CommitBatches(UProceduralMeshComponent* Target, bool bCollision);
 
+	UMaterialInterface* GetBaseMaterial();
+	UMaterialInstanceDynamic* MakeColorMID(const FColor& C);
+
 	// Builders
+	void BuildWorld();
 	void BuildEnvironmentLighting();
 	void BuildTerrain();
 	void BuildStructures();
@@ -79,4 +89,5 @@ protected:
 	static FVector GroundPos(float AX, float AY, float LiftCm = 0.f); // metres -> UE cm
 
 	float TimeAccum = 0.f;
+	bool bWorldBuilt = false;
 };

@@ -7,10 +7,16 @@ in C++ at runtime**, so the project runs from a completely empty level with **no
 imported art assets required**. When you're ready, you drop your own Sketchfab
 models in on top (guide near the bottom).
 
-> Honest note: I wrote this without a copy of Unreal to compile against, so treat
-> it as a strong starting point rather than guaranteed-clean-on-first-build. The
-> code is idiomatic UE 5.3 C++; if the first compile flags something, it'll almost
-> always be a one-line include or API-name tweak. Nothing here needs Blueprints.
+> **Honest note on build status.** This code has never been compiled — it was
+> written, and later hardened, without a copy of Unreal available. Treat it as a
+> strong starting point, not as guaranteed-clean-on-first-build. Nothing here
+> needs Blueprints.
+>
+> A hardening pass has since fixed the defects that were findable by inspection
+> (see [§8](#8-ue-58-hardening-pass)), including one guaranteed compile error and
+> several missing includes. `python3 Tools/check_sources.py` runs the static
+> checks that *are* possible without an engine and currently passes clean. That
+> is a much lower bar than a real compile — expect to still fix a thing or two.
 
 ---
 
@@ -38,9 +44,16 @@ models in on top (guide near the bottom).
    target from your IDE first, then open.)
 3. **Create the level.** The project points at a map it expects you to make:
    - In the editor: **File → New Level → Empty Level**.
-   - **File → Save Current Level As** → make a folder `Maps`, name it `Millhaven`.
-     (Final path: `Content/Maps/Millhaven`.) This matches the default-map setting
-     already in `Config/DefaultEngine.ini`, so nothing else to configure.
+   - **File → Save Current Level As** → the `Maps` folder already exists, name it
+     `Millhaven`. (Final path: `Content/Maps/Millhaven`.) This matches the
+     default-map setting already in `Config/DefaultEngine.ini`, so nothing else
+     to configure.
+   - *Or*, to skip the clicking: enable the **Python Editor Script Plugin** and
+     run `Tools/create_millhaven_map.py` (instructions are in the file header).
+
+   Until this map exists the editor will warn on startup that it can't find
+   `/Game/Maps/Millhaven` and open a blank map instead. That's harmless — the
+   Game Mode is set project-wide, so **Play** still builds the whole world.
 4. **Confirm the Game Mode.** Edit → Project Settings → **Maps & Modes**. The
    *Default GameMode* should already be `MillhavenGameMode`. If it's blank, set it.
 5. **Press Play.** The village, harbour, forest, cave, NPCs and sky all build the
@@ -76,7 +89,7 @@ Everything lives in `Source/Millhaven/`:
 
 | File | Role |
 |---|---|
-| `ProcMeshLib.h` | Tiny geometry kit: `AddBox`, `AddCone`, `AddCylinder`, etc. (flat-shaded low-poly). |
+| `ProcMeshLib.h` | Tiny geometry kit: `AddBox`, `AddCone`, `AddCylinder`, etc. (flat-shaded low-poly). The accumulator type is `FMillhavenMeshBatch` — **not** `FMeshBatch`, which is an engine type. |
 | `MillhavenWorldGen.cpp` | Builds terrain, buildings, dock, cave, trees, water, clouds; spawns NPCs. **Start here to change the map.** |
 | `MillhavenNPC.cpp` | NPC body + dialogue-tree storage. |
 | `MillhavenCharacter.cpp` | Third-person player, movement, camera, interaction, quest state. |
@@ -122,12 +135,18 @@ Your procedural props are placeholders. To swap in real art:
      ```cpp
      // near the top of the .cpp
      #include "Components/StaticMeshComponent.h"
-     #include "UObject/ConstructorHelpers.h"
+     #include "Engine/StaticMesh.h"
+
+     // ...and in MillhavenWorldGen.h, so the mesh stays GC-rooted:
+     //     UPROPERTY() UStaticMesh* TreeMesh = nullptr;
 
      void AMillhavenWorldGen::AddTree(float AX, float AY, float Scale)
      {
-         static UStaticMesh* TreeMesh =
-             LoadObject<UStaticMesh>(nullptr, TEXT("/Game/Trees/SM_PineTree.SM_PineTree"));
+         if (!TreeMesh)
+         {
+             TreeMesh = LoadObject<UStaticMesh>(
+                 nullptr, TEXT("/Game/Trees/SM_PineTree.SM_PineTree"));
+         }
          if (!TreeMesh) return;
          UStaticMeshComponent* SM = NewObject<UStaticMeshComponent>(this);
          SM->RegisterComponent();
@@ -138,14 +157,23 @@ Your procedural props are placeholders. To swap in real art:
      }
      ```
 
+     > Cache the loaded asset in a `UPROPERTY()` member, **not** a function-local
+     > `static UStaticMesh*`. A bare static is invisible to the garbage collector,
+     > so the mesh can be collected out from under you between levels.
+
    The same pattern replaces bushes, rocks, the well, buildings, the castle, etc.
    — keep the `GroundPos(...)` placement so props still sit on the terrain.
 
 ## 7. Known limitations / first-tweak checklist
 
-- **Player falls through / floats:** if the terrain collision lags a frame, the
-  spawn safety in `MillhavenCharacter::BeginPlay` lifts you to
-  `TerrainHeight + 120cm`. If needed, raise that value.
+- **Player falls through / floats:** the pawn spawns at `TerrainHeight + 120cm`,
+  and `MillhavenCharacter::EnforceGroundSafety()` re-seats you every tick if you
+  ever end up more than 4m below the analytic terrain height. If you still fall,
+  the world mesh's collision is not cooking — check the Output Log.
+- **First-frame hitch.** The terrain is ~14k triangles and its collision is cooked
+  synchronously at `BeginPlay` so the player never lands on an uncooked mesh. That
+  costs a visible hitch on load. To trade safety for smoothness, set
+  `Mesh->bUseAsyncCooking = true` in the `AMillhavenWorldGen` constructor.
 - **Trees are walk-through** (decorative, no collision) so you never snag on
   foliage. Add collision later per the asset-swap section if you want solid trunks.
 - **Sky/lighting** uses a real-time Sky Light + Sky Atmosphere. If the sky is
@@ -153,5 +181,62 @@ Your procedural props are placeholders. To swap in real art:
   real-time capture in `BuildEnvironmentLighting()`.
 - **Limb animation** is a simple body-bob (Procedural Mesh can't rotate individual
   sections). For real walk cycles, swap the avatar for a Skeletal Mesh later.
+
+---
+
+## 8. UE 5.8 hardening pass
+
+Changes made to get the project closer to a clean first build. Nothing here was
+verified by a compiler — see the note at the top.
+
+**Would not have compiled**
+
+- `ProcMeshLib.h` declared a global `struct FMeshBatch`. The engine already
+  declares `FMeshBatch` (`SceneManagement.h`), which the Engine shared PCH pulls
+  in — a guaranteed redefinition error. Renamed to `FMillhavenMeshBatch`.
+- Added the includes that `EngineIncludeOrderVersion.Latest` (IWYU) requires but
+  that nothing pulled in transitively: `GameFramework/Controller.h`,
+  `GameFramework/PlayerController.h`, `Camera/PlayerCameraManager.h`,
+  `Engine/LocalPlayer.h`, `Engine/World.h`, `Engine/Font.h`, `EngineUtils.h`,
+  `Materials/Material.h`.
+
+**Would have compiled, but misbehaved at runtime**
+
+- **Input assets.** `UInputAction` and `UInputMappingContext` are `UDataAsset`s,
+  and were being built with `CreateDefaultSubobject` in the character
+  constructor. They are now built with `NewObject` and held in `UPROPERTY()`
+  members. Because `SetupPlayerInputComponent` can run *before* `BeginPlay`,
+  construction is idempotent and driven from `PawnClientRestart`.
+- **GC hazards.** Two `static UMaterialInterface*` caches held UObject pointers
+  invisible to the garbage collector; they are now `UPROPERTY()` members with a
+  `GetDefaultMaterial` fallback. The `AMillhavenNPC::All` registry now holds
+  `TWeakObjectPtr`, so a destroyed NPC can't leave a dangling entry.
+- **LWC narrowing.** `FVector`/`FVector2D` are double-based in UE5. Results from
+  `Dist2D`, `Size2D`, `FVector2D::Distance` and `Atan2` were being assigned
+  straight to `float`; all such sites now cast explicitly (C4244).
+- **Dialogue use-after-free.** `SelectOption` read `Opt.Next` after calling
+  `OnClose()`, which clears `ActiveNPC` and invalidates the node it points into.
+- **World build ordering.** The generator was spawned from `GameMode::BeginPlay`,
+  which is not ordered against the pawn's. It now spawns in `InitGame`, so its
+  `BeginPlay` runs in the world's normal actor sweep, and it refuses to
+  double-build if one was already placed in the level by hand.
+- **Cloud placement.** `BuildClouds` seeded its PRNG with `i * j + k`, which
+  collapses to the same value whenever `i` or `j` is 0 — so several cloud
+  clusters were stacked in one spot. Seeds now mix `i` and `j` with distinct
+  primes.
+- `AddFenceRun` divided by a step count that is 0 for a zero-length segment.
+- The HUD minimap's hardcoded building list had drifted from `BuildStructures()`
+  and is now a single named table with a comment tying the two together.
+- `AddOption` against an unknown node key silently dropped the option; it now
+  warns.
+
+**Tooling**
+
+- `Tools/check_sources.py` — static checks that don't need an engine: engine
+  type-name collisions, `.generated.h` include ordering, declaration/definition
+  cross-checks, brace balance, unresolvable local includes, missing
+  `GENERATED_BODY()`. Run it before you build; exit code is non-zero on error.
+- `Tools/create_millhaven_map.py` — creates `Content/Maps/Millhaven` so you can
+  skip the manual level-creation step.
 
 Have fun in Millhaven.

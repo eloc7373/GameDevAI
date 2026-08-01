@@ -1,17 +1,19 @@
 #include "MillhavenNPC.h"
 #include "ProcMeshLib.h"
 #include "ProceduralMeshComponent.h"
+#include "Components/SceneComponent.h"
+#include "Engine/World.h"
+#include "Materials/MaterialInterface.h"
+#include "Materials/Material.h"
 #include "Materials/MaterialInstanceDynamic.h"
 
-TArray<AMillhavenNPC*> AMillhavenNPC::All;
+TArray<TWeakObjectPtr<AMillhavenNPC>> AMillhavenNPC::All;
 
-static UMaterialInstanceDynamic* NPCMakeColorMID(UObject* Outer, const FColor& C)
+static UMaterialInstanceDynamic* NPCMakeColorMID(UObject* Outer, UMaterialInterface* Base, const FColor& C)
 {
-	static UMaterialInterface* Base = nullptr;
 	if (!Base)
 	{
-		Base = LoadObject<UMaterialInterface>(nullptr,
-			TEXT("/Engine/BasicShapes/BasicShapeMaterial.BasicShapeMaterial"));
+		return nullptr;
 	}
 	UMaterialInstanceDynamic* MID = UMaterialInstanceDynamic::Create(Base, Outer);
 	if (MID)
@@ -22,13 +24,17 @@ static UMaterialInstanceDynamic* NPCMakeColorMID(UObject* Outer, const FColor& C
 }
 
 static void NPCCommitSection(UProceduralMeshComponent* Mesh, int32 Section,
-                             FMeshBatch& Batch, UMaterialInstanceDynamic* MID)
+                             FMillhavenMeshBatch& Batch, const FColor& Tint,
+                             UMaterialInstanceDynamic* MID)
 {
 	TArray<FLinearColor> Colors;
-	Colors.Init(FLinearColor::White, Batch.V.Num());
+	Colors.Init(FLinearColor::FromSRGBColor(Tint), Batch.V.Num());
 	Mesh->CreateMeshSection_LinearColor(Section, Batch.V, Batch.T, Batch.N, Batch.UV,
 		Colors, TArray<FProcMeshTangent>(), false);
-	Mesh->SetMaterial(Section, MID);
+	if (MID)
+	{
+		Mesh->SetMaterial(Section, MID);
+	}
 }
 
 AMillhavenNPC::AMillhavenNPC()
@@ -58,10 +64,12 @@ void AMillhavenNPC::BeginPlay()
 	BobPhase = FMath::FRandRange(0.f, 2.f * PI);
 }
 
-void AMillhavenNPC::EndPlay(const EEndPlayReason::Type Reason)
+void AMillhavenNPC::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
 	All.Remove(this);
-	Super::EndPlay(Reason);
+	// Drop any entries whose actor has already gone away.
+	All.RemoveAll([](const TWeakObjectPtr<AMillhavenNPC>& W) { return !W.IsValid(); });
+	Super::EndPlay(EndPlayReason);
 }
 
 void AMillhavenNPC::Init(const FString& InName, const FString& InRole,
@@ -70,43 +78,53 @@ void AMillhavenNPC::Init(const FString& InName, const FString& InRole,
 	NpcName = InName;
 	Role = InRole;
 
+	if (!BaseMaterial)
+	{
+		BaseMaterial = LoadObject<UMaterialInterface>(nullptr,
+			TEXT("/Engine/BasicShapes/BasicShapeMaterial.BasicShapeMaterial"));
+	}
+	if (!BaseMaterial)
+	{
+		BaseMaterial = UMaterial::GetDefaultMaterial(MD_Surface);
+	}
+
 	const FColor LegColor(
 		(uint8)(BodyColor.R * 0.6f), (uint8)(BodyColor.G * 0.6f), (uint8)(BodyColor.B * 0.6f));
 
 	// Local body frame: +X forward, +Y right, +Z up. Sizes in cm.
 	// Legs (static)
 	{
-		FMeshBatch B;
-		B.AddBox(FVector(0,  14, 26), FVector(20, 19, 52));
-		B.AddBox(FVector(0, -14, 26), FVector(20, 19, 52));
-		UMaterialInstanceDynamic* MID = NPCMakeColorMID(this, LegColor);
-		MIDs.Add(MID);
-		NPCCommitSection(LegsMesh, 0, B, MID);
+		FMillhavenMeshBatch B;
+		B.AddBox(FVector(0.0,  14.0, 26.0), FVector(20.0, 19.0, 52.0));
+		B.AddBox(FVector(0.0, -14.0, 26.0), FVector(20.0, 19.0, 52.0));
+		UMaterialInstanceDynamic* MID = NPCMakeColorMID(this, BaseMaterial, LegColor);
+		if (MID) { MIDs.Add(MID); }
+		NPCCommitSection(LegsMesh, 0, B, LegColor, MID);
 	}
 	// Body (bobs)
 	{
-		FMeshBatch B;
-		B.AddBox(FVector::ZeroVector, FVector(27, 47, 68));
-		UMaterialInstanceDynamic* MID = NPCMakeColorMID(this, BodyColor);
-		MIDs.Add(MID);
-		NPCCommitSection(BodyMesh, 0, B, MID);
-		BodyMesh->SetRelativeLocation(FVector(0, 0, 88));
+		FMillhavenMeshBatch B;
+		B.AddBox(FVector::ZeroVector, FVector(27.0, 47.0, 68.0));
+		UMaterialInstanceDynamic* MID = NPCMakeColorMID(this, BaseMaterial, BodyColor);
+		if (MID) { MIDs.Add(MID); }
+		NPCCommitSection(BodyMesh, 0, B, BodyColor, MID);
+		BodyMesh->SetRelativeLocation(FVector(0.0, 0.0, 88.0));
 	}
 	// Head + hair (bobs)
 	{
-		FMeshBatch Skin;
-		Skin.AddBox(FVector::ZeroVector, FVector(41, 41, 41));
-		UMaterialInstanceDynamic* SkinMID = NPCMakeColorMID(this, SkinColor);
-		MIDs.Add(SkinMID);
-		NPCCommitSection(HeadMesh, 0, Skin, SkinMID);
+		FMillhavenMeshBatch Skin;
+		Skin.AddBox(FVector::ZeroVector, FVector(41.0, 41.0, 41.0));
+		UMaterialInstanceDynamic* SkinMID = NPCMakeColorMID(this, BaseMaterial, SkinColor);
+		if (SkinMID) { MIDs.Add(SkinMID); }
+		NPCCommitSection(HeadMesh, 0, Skin, SkinColor, SkinMID);
 
-		FMeshBatch Hair;
-		Hair.AddBox(FVector(0, 0, 24), FVector(43, 43, 14));
-		UMaterialInstanceDynamic* HairMID = NPCMakeColorMID(this, HairColor);
-		MIDs.Add(HairMID);
-		NPCCommitSection(HeadMesh, 1, Hair, HairMID);
+		FMillhavenMeshBatch Hair;
+		Hair.AddBox(FVector(0.0, 0.0, 24.0), FVector(43.0, 43.0, 14.0));
+		UMaterialInstanceDynamic* HairMID = NPCMakeColorMID(this, BaseMaterial, HairColor);
+		if (HairMID) { MIDs.Add(HairMID); }
+		NPCCommitSection(HeadMesh, 1, Hair, HairColor, HairMID);
 
-		HeadMesh->SetRelativeLocation(FVector(0, 0, 147));
+		HeadMesh->SetRelativeLocation(FVector(0.0, 0.0, 147.0));
 	}
 }
 
@@ -129,20 +147,26 @@ void AMillhavenNPC::AddOption(FName NodeKey, const FString& Label, FName Next,
 		Opt.QuestObjective = QuestObjective;
 		Node->Options.Add(Opt);
 	}
+	else
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("Millhaven: AddOption on unknown dialogue node '%s' (NPC '%s') - option dropped."),
+			*NodeKey.ToString(), *NpcName);
+	}
 }
 
 void AMillhavenNPC::FacePoint(const FVector& WorldPoint)
 {
 	const FVector To = WorldPoint - GetActorLocation();
-	const float Yaw = FMath::RadiansToDegrees(FMath::Atan2(To.Y, To.X));
-	SetActorRotation(FRotator(0, Yaw, 0));
+	const float Yaw = (float)FMath::RadiansToDegrees(FMath::Atan2(To.Y, To.X));
+	SetActorRotation(FRotator(0.f, Yaw, 0.f));
 }
 
 void AMillhavenNPC::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
 	const float T = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.f;
-	const float Bob = FMath::Sin(T * 1.3f + BobPhase) * 4.f;
-	BodyMesh->SetRelativeLocation(FVector(0, 0, 88.f + Bob));
-	HeadMesh->SetRelativeLocation(FVector(0, 0, 147.f + Bob));
+	const double Bob = FMath::Sin(T * 1.3f + BobPhase) * 4.0;
+	BodyMesh->SetRelativeLocation(FVector(0.0, 0.0, 88.0 + Bob));
+	HeadMesh->SetRelativeLocation(FVector(0.0, 0.0, 147.0 + Bob));
 }

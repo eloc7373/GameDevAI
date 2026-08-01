@@ -4,11 +4,25 @@
 #include "MillhavenWorldGen.h"
 #include "Engine/Canvas.h"
 #include "Engine/Engine.h"
+#include "Engine/Font.h"
+#include "Engine/World.h"
+#include "GameFramework/PlayerController.h"
 
 static const FLinearColor PanelBg(0.05f, 0.03f, 0.01f, 0.82f);
 static const FLinearColor Gold(0.96f, 0.75f, 0.19f, 1.f);
 static const FLinearColor TextCol(0.9f, 0.86f, 0.78f, 1.f);
 static const FLinearColor Dim(0.6f, 0.6f, 0.6f, 1.f);
+
+// Village building footprints in design metres, kept in sync with the
+// AddBuilding() calls in MillhavenWorldGen::BuildStructures().
+static const FVector2D VillageBuildings[] = {
+	{ -7.0,  -2.0 },
+	{  6.0,  -3.5 },
+	{ -6.0,   6.0 },
+	{  7.5,   6.0 },
+	{  0.0,  -9.0 },
+	{ -12.0, -5.0 },
+};
 
 void AMillhavenHUD::Panel(float X, float Y, float W, float H, const FLinearColor& Col)
 {
@@ -29,7 +43,7 @@ TArray<FString> AMillhavenHUD::WrapText(const FString& S, int32 MaxChars)
 	FString Line;
 	for (const FString& W : Words)
 	{
-		if (Line.Len() + W.Len() + 1 > MaxChars)
+		if (!Line.IsEmpty() && Line.Len() + W.Len() + 1 > MaxChars)
 		{
 			Lines.Add(Line);
 			Line = W;
@@ -78,7 +92,7 @@ void AMillhavenHUD::DrawQuestPanel(AMillhavenCharacter* C)
 void AMillhavenHUD::DrawMinimap(AMillhavenCharacter* C)
 {
 	const float S = 150.f;
-	const float X = Canvas->SizeX - S - 24.f, Y = 24.f;
+	const float X = (float)Canvas->SizeX - S - 24.f, Y = 24.f;
 	Panel(X, Y, S, S, FLinearColor(0.06f, 0.16f, 0.10f, 0.85f));
 	Panel(X, Y, S, 3.f, Gold);
 
@@ -86,28 +100,32 @@ void AMillhavenHUD::DrawMinimap(AMillhavenCharacter* C)
 	const float cx = X + S * 0.5f, cy = Y + S * 0.5f;
 	const float scale = 0.006f; // world cm -> minimap px
 
-	// buildings
-	const FVector2D Buildings[] = {
-		{-7,-2},{6,-3.5},{-6,6},{7.5,6},{0,-9},{-12,-5} };
-	for (const FVector2D& b : Buildings)
+	auto Blip = [&](double WorldX, double WorldY, const FLinearColor& Col, float Size)
 	{
-		const float mx = cx + (b.X * 100.f - P.X) * scale;
-		const float my = cy + (b.Y * 100.f - P.Y) * scale;
+		const float mx = cx + (float)((WorldX - P.X) * scale);
+		const float my = cy + (float)((WorldY - P.Y) * scale);
 		if (mx > X && mx < X + S && my > Y && my < Y + S)
-			Panel(mx - 3, my - 3, 6, 6, FLinearColor(0.78f, 0.44f, 0.25f, 1.f));
+		{
+			Panel(mx - Size * 0.5f, my - Size * 0.5f, Size, Size, Col);
+		}
+	};
+
+	// buildings
+	for (const FVector2D& b : VillageBuildings)
+	{
+		Blip(b.X * 100.0, b.Y * 100.0, FLinearColor(0.78f, 0.44f, 0.25f, 1.f), 6.f);
 	}
 	// NPCs
-	for (AMillhavenNPC* N : AMillhavenNPC::All)
+	for (const TWeakObjectPtr<AMillhavenNPC>& Weak : AMillhavenNPC::All)
 	{
-		if (!N) continue;
-		const FVector L = N->GetActorLocation();
-		const float mx = cx + (L.X - P.X) * scale;
-		const float my = cy + (L.Y - P.Y) * scale;
-		if (mx > X && mx < X + S && my > Y && my < Y + S)
-			Panel(mx - 3, my - 3, 6, 6, FLinearColor(1.f, 0.2f, 0.2f, 1.f));
+		if (const AMillhavenNPC* N = Weak.Get())
+		{
+			const FVector L = N->GetActorLocation();
+			Blip(L.X, L.Y, FLinearColor(1.f, 0.2f, 0.2f, 1.f), 6.f);
+		}
 	}
 	// player
-	Panel(cx - 4, cy - 4, 8, 8, FLinearColor(1.f, 0.9f, 0.25f, 1.f));
+	Panel(cx - 4.f, cy - 4.f, 8.f, 8.f, FLinearColor(1.f, 0.9f, 0.25f, 1.f));
 }
 
 void AMillhavenHUD::DrawPrompt(AMillhavenCharacter* C)
@@ -116,7 +134,7 @@ void AMillhavenHUD::DrawPrompt(AMillhavenCharacter* C)
 	if (!N) return;
 	const FString Msg = FString::Printf(TEXT("Press  E  -  Talk to %s"), *N->NpcName);
 	const float W = 360.f, H = 40.f;
-	const float X = (Canvas->SizeX - W) * 0.5f, Y = Canvas->SizeY - 150.f;
+	const float X = ((float)Canvas->SizeX - W) * 0.5f, Y = (float)Canvas->SizeY - 150.f;
 	Panel(X, Y, W, H, PanelBg);
 	Text(Msg, X + 24.f, Y + 12.f, TextCol, 1.0f);
 }
@@ -128,8 +146,8 @@ void AMillhavenHUD::DrawDialogue(AMillhavenCharacter* C)
 	const FDlgNode* Node = N->GetNode(C->GetCurrentNode());
 	if (!Node) return;
 
-	const float W = 720.f, X = (Canvas->SizeX - W) * 0.5f;
-	const float H = 210.f, Y = Canvas->SizeY - H - 40.f;
+	const float W = 720.f, X = ((float)Canvas->SizeX - W) * 0.5f;
+	const float H = 210.f, Y = (float)Canvas->SizeY - H - 40.f;
 	Panel(X, Y, W, H, FLinearColor(0.04f, 0.024f, 0.008f, 0.94f));
 	Panel(X, Y, W, 3.f, Gold);
 
@@ -160,7 +178,7 @@ void AMillhavenHUD::DrawDialogue(AMillhavenCharacter* C)
 void AMillhavenHUD::DrawLocation(AMillhavenCharacter* C)
 {
 	const FVector P = C->GetActorLocation();
-	const FString Biome = AMillhavenWorldGen::BiomeAt(P.X, P.Y);
+	const FString Biome = AMillhavenWorldGen::BiomeAt((float)P.X, (float)P.Y);
 	if (Biome != LastBiome)
 	{
 		LastBiome = Biome;
@@ -168,16 +186,17 @@ void AMillhavenHUD::DrawLocation(AMillhavenCharacter* C)
 	}
 	if (BannerTimer > 0.f)
 	{
-		BannerTimer -= GetWorld()->GetDeltaSeconds();
-		const float W = 300.f, X = (Canvas->SizeX - W) * 0.5f, Y = 22.f;
-		Panel(X, Y, W, 34.f, PanelBg);
+		const UWorld* W = GetWorld();
+		BannerTimer -= W ? W->GetDeltaSeconds() : 0.f;
+		const float BW = 300.f, X = ((float)Canvas->SizeX - BW) * 0.5f, Y = 22.f;
+		Panel(X, Y, BW, 34.f, PanelBg);
 		Text(Biome, X + 20.f, Y + 9.f, FLinearColor(0.96f, 0.82f, 0.44f, 1.f), 1.1f);
 	}
 }
 
 void AMillhavenHUD::DrawControls()
 {
-	const float X = Canvas->SizeX - 190.f, Y = Canvas->SizeY - 96.f;
+	const float X = (float)Canvas->SizeX - 190.f, Y = (float)Canvas->SizeY - 96.f;
 	Text(TEXT("WASD  Move"), X, Y, Dim, 0.8f);
 	Text(TEXT("Mouse  Look"), X, Y + 18.f, Dim, 0.8f);
 	Text(TEXT("E  Interact"), X, Y + 36.f, Dim, 0.8f);

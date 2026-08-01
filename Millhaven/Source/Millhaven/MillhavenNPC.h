@@ -2,9 +2,11 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
+#include "UObject/WeakObjectPtrTemplates.h"
 #include "MillhavenNPC.generated.h"
 
 class UProceduralMeshComponent;
+class UMaterialInterface;
 class UMaterialInstanceDynamic;
 
 // Plain structs (no reflection needed - built and consumed in C++ only)
@@ -45,8 +47,12 @@ public:
 	FString NpcName;
 	FString Role;
 
-	/** Global registry so the player/HUD can find NPCs without iteration order issues. */
-	static TArray<AMillhavenNPC*> All;
+	/**
+	 * Global registry so the player/HUD can find NPCs without iteration order
+	 * issues. Weak pointers, so a destroyed or GC'd NPC never leaves a dangling
+	 * entry even if EndPlay is skipped (level teardown, PIE stop).
+	 */
+	static TArray<TWeakObjectPtr<AMillhavenNPC>> All;
 
 protected:
 	virtual void BeginPlay() override;
@@ -57,6 +63,7 @@ protected:
 	UPROPERTY() UProceduralMeshComponent* BodyMesh = nullptr;
 	UPROPERTY() UProceduralMeshComponent* HeadMesh = nullptr;
 
+	UPROPERTY() UMaterialInterface* BaseMaterial = nullptr;
 	UPROPERTY() TArray<UMaterialInstanceDynamic*> MIDs;
 
 	TMap<FName, FDlgNode> Dialogue;

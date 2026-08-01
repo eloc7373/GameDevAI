@@ -8,6 +8,7 @@
 class USpringArmComponent;
 class UCameraComponent;
 class UProceduralMeshComponent;
+class UMaterialInterface;
 class UMaterialInstanceDynamic;
 class UInputAction;
 class UInputMappingContext;
@@ -28,12 +29,16 @@ public:
 	AMillhavenCharacter();
 	virtual void Tick(float DeltaTime) override;
 	virtual void SetupPlayerInputComponent(UInputComponent* PlayerInputComponent) override;
+	virtual void PawnClientRestart() override;
 
 	// HUD-facing state
 	bool IsInDialogue() const { return ActiveNPC != nullptr; }
 	AMillhavenNPC* GetActiveNPC() const { return ActiveNPC; }
 	FName GetCurrentNode() const { return CurrentNode; }
 	AMillhavenNPC* GetNearbyNPC() const;
+
+	/** How close (cm, 2D) the player must be for the interact prompt to appear. */
+	static constexpr float InteractRangeCm = 320.f;
 
 	FString QuestName = TEXT("The Everloaf");
 	FString QuestObjective = TEXT("Explore the village and speak to someone");
@@ -45,9 +50,12 @@ protected:
 	UPROPERTY() USpringArmComponent* SpringArm = nullptr;
 	UPROPERTY() UCameraComponent* Camera = nullptr;
 	UPROPERTY() UProceduralMeshComponent* Avatar = nullptr;
+	UPROPERTY() UMaterialInterface* BaseMaterial = nullptr;
 	UPROPERTY() TArray<UMaterialInstanceDynamic*> MIDs;
 
-	// Enhanced Input - created in C++, no .uasset files required
+	// Enhanced Input - created at runtime in C++, no .uasset files required.
+	// These are UDataAsset types, so they are built with NewObject in BeginPlay
+	// rather than CreateDefaultSubobject (which is for CDO component subobjects).
 	UPROPERTY() UInputMappingContext* InputMapping = nullptr;
 	UPROPERTY() UInputAction* MoveForwardAction = nullptr;
 	UPROPERTY() UInputAction* MoveRightAction = nullptr;
@@ -61,7 +69,16 @@ protected:
 	UPROPERTY() UInputAction* Dialogue4Action = nullptr;
 	UPROPERTY() UInputAction* JumpAction = nullptr;
 
+	/** Creates the Input Actions + mapping context. Safe to call more than once. */
+	void BuildInputAssets();
+
+	/** Pushes the mapping context onto the local player and clamps camera pitch. */
+	void RegisterInputMapping();
+
 	void BuildAvatar();
+
+	/** Lifts the pawn back onto the terrain if it ever ends up under it. */
+	void EnforceGroundSafety();
 
 	// Input handlers (Enhanced Input signatures)
 	void MoveForward(const FInputActionValue& Value);

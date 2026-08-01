@@ -15,5 +15,12 @@ public class Millhaven : ModuleRules
 			"EnhancedInput",
 			"ProceduralMeshComponent"
 		});
+
+		// UProceduralMeshComponent cooks collision at runtime (bCreateCollision
+		// is true for the terrain section), which pulls in PhysicsCore types.
+		PrivateDependencyModuleNames.AddRange(new string[]
+		{
+			"PhysicsCore"
+		});
 	}
 }

@@ -1,38 +1,16 @@
 #include "MillhavenWorldGen.h"
 #include "MillhavenNPC.h"
+
 #include "ProceduralMeshComponent.h"
-#include "Materials/MaterialInstanceDynamic.h"
+#include "Components/SceneComponent.h"
 #include "Components/DirectionalLightComponent.h"
 #include "Components/SkyLightComponent.h"
 #include "Components/SkyAtmosphereComponent.h"
 #include "Components/ExponentialHeightFogComponent.h"
 #include "Engine/World.h"
-
-// ---------------------------------------------------------------------------
-// Shared: create a colored material instance from the engine's basic material.
-// Uses the "Color" parameter AND fills vertex colors, so the world looks right
-// whether the section renders via the param or via a vertex-color material.
-// ---------------------------------------------------------------------------
-static UMaterialInterface* GetBaseColorMaterial()
-{
-	static UMaterialInterface* Base = nullptr;
-	if (!Base)
-	{
-		Base = LoadObject<UMaterialInterface>(nullptr,
-			TEXT("/Engine/BasicShapes/BasicShapeMaterial.BasicShapeMaterial"));
-	}
-	return Base;
-}
-
-static UMaterialInstanceDynamic* MakeColorMID(UObject* Outer, const FColor& C)
-{
-	UMaterialInstanceDynamic* MID = UMaterialInstanceDynamic::Create(GetBaseColorMaterial(), Outer);
-	if (MID)
-	{
-		MID->SetVectorParameterValue(FName("Color"), FLinearColor::FromSRGBColor(C));
-	}
-	return MID;
-}
+#include "Materials/MaterialInterface.h"
+#include "Materials/Material.h"
+#include "Materials/MaterialInstanceDynamic.h"
 
 // ---------------------------------------------------------------------------
 
@@ -45,6 +23,9 @@ AMillhavenWorldGen::AMillhavenWorldGen()
 
 	Mesh = CreateDefaultSubobject<UProceduralMeshComponent>(TEXT("WorldMesh"));
 	Mesh->SetupAttachment(SceneRoot);
+	// Collision is cooked synchronously so the player never lands on a mesh
+	// whose collision has not finished building.
+	Mesh->bUseAsyncCooking = false;
 
 	DecorMesh = CreateDefaultSubobject<UProceduralMeshComponent>(TEXT("DecorMesh"));
 	DecorMesh->SetupAttachment(SceneRoot);
@@ -72,6 +53,43 @@ AMillhavenWorldGen::AMillhavenWorldGen()
 
 	Fog = CreateDefaultSubobject<UExponentialHeightFogComponent>(TEXT("HeightFog"));
 	Fog->SetupAttachment(SceneRoot);
+}
+
+// ---------------------------------------------------------------------------
+// Shared: create a colored material instance from the engine's basic material.
+// Uses the "Color" parameter AND fills vertex colors, so the world looks right
+// whether the section renders via the param or via a vertex-color material.
+// ---------------------------------------------------------------------------
+UMaterialInterface* AMillhavenWorldGen::GetBaseMaterial()
+{
+	if (!BaseMaterial)
+	{
+		BaseMaterial = LoadObject<UMaterialInterface>(nullptr,
+			TEXT("/Engine/BasicShapes/BasicShapeMaterial.BasicShapeMaterial"));
+	}
+	if (!BaseMaterial)
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("Millhaven: BasicShapeMaterial not found, falling back to the default surface ")
+			TEXT("material. See README section 5 for the M_VertexColor workaround."));
+		BaseMaterial = UMaterial::GetDefaultMaterial(MD_Surface);
+	}
+	return BaseMaterial;
+}
+
+UMaterialInstanceDynamic* AMillhavenWorldGen::MakeColorMID(const FColor& C)
+{
+	UMaterialInterface* Base = GetBaseMaterial();
+	if (!Base)
+	{
+		return nullptr;
+	}
+	UMaterialInstanceDynamic* MID = UMaterialInstanceDynamic::Create(Base, this);
+	if (MID)
+	{
+		MID->SetVectorParameterValue(FName("Color"), FLinearColor::FromSRGBColor(C));
+	}
+	return MID;
 }
 
 float AMillhavenWorldGen::Prng(float Seed)
@@ -128,22 +146,27 @@ FVector AMillhavenWorldGen::GroundPos(float AX, float AY, float LiftCm)
 	return FVector(WX, WY, TerrainHeight(WX, WY) + LiftCm);
 }
 
-FMeshBatch& AMillhavenWorldGen::B(const FColor& Color)
+FMillhavenMeshBatch& AMillhavenWorldGen::B(const FColor& Color)
 {
 	for (auto& Pair : Batches)
 	{
 		if (Pair.Key == Color) return Pair.Value;
 	}
-	Batches.Add(TPair<FColor, FMeshBatch>(Color, FMeshBatch()));
+	Batches.Add(TPair<FColor, FMillhavenMeshBatch>(Color, FMillhavenMeshBatch()));
 	return Batches.Last().Value;
 }
 
 void AMillhavenWorldGen::CommitBatches(UProceduralMeshComponent* Target, bool bCollision)
 {
+	if (!Target)
+	{
+		return;
+	}
+
 	int32 Section = Target->GetNumSections();
 	for (auto& Pair : Batches)
 	{
-		FMeshBatch& Bat = Pair.Value;
+		FMillhavenMeshBatch& Bat = Pair.Value;
 		if (Bat.V.Num() == 0) continue;
 
 		TArray<FLinearColor> Colors;
@@ -152,9 +175,11 @@ void AMillhavenWorldGen::CommitBatches(UProceduralMeshComponent* Target, bool bC
 		Target->CreateMeshSection_LinearColor(Section, Bat.V, Bat.T, Bat.N, Bat.UV,
 			Colors, TArray<FProcMeshTangent>(), bCollision);
 
-		UMaterialInstanceDynamic* MID = MakeColorMID(this, Pair.Key);
-		MIDs.Add(MID);
-		Target->SetMaterial(Section, MID);
+		if (UMaterialInstanceDynamic* MID = MakeColorMID(Pair.Key))
+		{
+			MIDs.Add(MID);
+			Target->SetMaterial(Section, MID);
+		}
 		Section++;
 	}
 	Batches.Empty();
@@ -163,6 +188,16 @@ void AMillhavenWorldGen::CommitBatches(UProceduralMeshComponent* Target, bool bC
 void AMillhavenWorldGen::BeginPlay()
 {
 	Super::BeginPlay();
+	BuildWorld();
+}
+
+void AMillhavenWorldGen::BuildWorld()
+{
+	if (bWorldBuilt)
+	{
+		return;
+	}
+	bWorldBuilt = true;
 
 	BuildEnvironmentLighting();
 
@@ -241,9 +276,9 @@ void AMillhavenWorldGen::BuildTerrain()
 			const FVector C = Corner(i + 1, j + 1);
 			const FVector D = Corner(i, j + 1);
 
-			const float avgZ = (A.Z + Bv.Z + C.Z + D.Z) * 0.25f;
-			const float ax = (A.X + C.X) * 0.5f / 100.f;
-			const float ay = (A.Y + C.Y) * 0.5f / 100.f;
+			const float avgZ = (float)((A.Z + Bv.Z + C.Z + D.Z) * 0.25);
+			const float ax = (float)((A.X + C.X) * 0.5 / 100.0);
+			const float ay = (float)((A.Y + C.Y) * 0.5 / 100.0);
 
 			FColor Col = ((i + j) & 1) ? Grass : GrassDark;
 			if (avgZ > 380.f) Col = Highland;
@@ -276,18 +311,18 @@ void AMillhavenWorldGen::AddBuilding(float AX, float AY, float W, float D,
 	const float wall = 280.f, wCm = W * 100.f, dCm = D * 100.f;
 
 	// Walls
-	B(WallColor).AddBox(base + FVector(0, 0, wall * 0.5f), FVector(wCm, dCm, wall));
+	B(WallColor).AddBox(base + FVector(0.0, 0.0, wall * 0.5), FVector(wCm, dCm, wall));
 	// Roof (4-sided pyramid)
-	B(RoofColor).AddCone(base + FVector(0, 0, wall), FMath::Max(wCm, dCm) * 0.78f, 170.f, 4, 45.f);
+	B(RoofColor).AddCone(base + FVector(0.0, 0.0, wall), FMath::Max(wCm, dCm) * 0.78f, 170.f, 4, 45.f);
 	// Door
-	B(FColor(90, 46, 16)).AddBox(base + FVector(dCm * 0.5f + 4.f, 0, 65.f), FVector(9.f, 68.f, 130.f));
+	B(FColor(90, 46, 16)).AddBox(base + FVector(dCm * 0.5 + 4.0, 0.0, 65.0), FVector(9.0, 68.0, 130.0));
 	// Windows
 	const FColor Win(184, 218, 240);
-	B(Win).AddBox(base + FVector(dCm * 0.5f + 4.f, -95.f, 145.f), FVector(9.f, 52.f, 52.f));
-	B(Win).AddBox(base + FVector(dCm * 0.5f + 4.f,  95.f, 145.f), FVector(9.f, 52.f, 52.f));
+	B(Win).AddBox(base + FVector(dCm * 0.5 + 4.0, -95.0, 145.0), FVector(9.0, 52.0, 52.0));
+	B(Win).AddBox(base + FVector(dCm * 0.5 + 4.0,  95.0, 145.0), FVector(9.0, 52.0, 52.0));
 	// Chimney
-	B(FColor(136, 112, 96)).AddBox(base + FVector(-wCm * 0.28f, wCm * 0.25f, wall + 125.f),
-		FVector(32.f, 32.f, 85.f));
+	B(FColor(136, 112, 96)).AddBox(base + FVector(-wCm * 0.28, wCm * 0.25, wall + 125.0),
+		FVector(32.0, 32.0, 85.0));
 }
 
 void AMillhavenWorldGen::AddFenceRun(const TArray<FVector2D>& Points)
@@ -296,93 +331,102 @@ void AMillhavenWorldGen::AddFenceRun(const TArray<FVector2D>& Points)
 	for (int32 k = 0; k < Points.Num() - 1; k++)
 	{
 		const FVector2D P0 = Points[k], P1 = Points[k + 1];
-		const float len = FVector2D::Distance(P0, P1);
-		const int32 steps = FMath::CeilToInt(len / 1.5f);
+		const float len = (float)FVector2D::Distance(P0, P1);
+		if (len < KINDA_SMALL_NUMBER)
+		{
+			continue; // duplicated point - nothing to fence
+		}
+		const int32 steps = FMath::Max(1, FMath::CeilToInt(len / 1.5f));
 		for (int32 s = 0; s <= steps; s++)
 		{
-			const float t = (float)s / steps;
-			const FVector2D p = FMath::Lerp(P0, P1, t);
-			B(Wood).AddBox(GroundPos(p.X, p.Y, 52.f), FVector(12.f, 12.f, 105.f));
+			const float t = (float)s / (float)steps;
+			const FVector2D p = FMath::Lerp(P0, P1, (double)t);
+			B(Wood).AddBox(GroundPos((float)p.X, (float)p.Y, 52.f), FVector(12.0, 12.0, 105.0));
 		}
 		// top rail
-		const FVector2D mid = (P0 + P1) * 0.5f;
-		const float yaw = FMath::RadiansToDegrees(FMath::Atan2(P1.Y - P0.Y, P1.X - P0.X));
-		B(Wood).AddBox(GroundPos(mid.X, mid.Y, 72.f), FVector(len * 100.f, 9.f, 9.f), yaw);
+		const FVector2D mid = (P0 + P1) * 0.5;
+		const float yaw = (float)FMath::RadiansToDegrees(FMath::Atan2(P1.Y - P0.Y, P1.X - P0.X));
+		B(Wood).AddBox(GroundPos((float)mid.X, (float)mid.Y, 72.f),
+			FVector(len * 100.f, 9.0, 9.0), yaw);
 	}
 }
 
 void AMillhavenWorldGen::AddStall(float AX, float AY)
 {
 	const FVector base = GroundPos(AX, AY, 0.f);
-	B(FColor(208, 64, 32)).AddBox(base + FVector(0, 0, 190.f), FVector(280.f, 200.f, 12.f)); // canopy
+	B(FColor(208, 64, 32)).AddBox(base + FVector(0.0, 0.0, 190.0), FVector(280.0, 200.0, 12.0)); // canopy
 	const FColor Post(138, 85, 48);
 	for (int32 s = 0; s < 4; s++)
 	{
-		const float ox = (s < 2 ? -120.f : 120.f);
-		const float oy = ((s % 2) ? -90.f : 90.f);
-		B(Post).AddBox(base + FVector(ox, oy, 95.f), FVector(12.f, 12.f, 190.f));
+		const double ox = (s < 2 ? -120.0 : 120.0);
+		const double oy = ((s % 2) ? -90.0 : 90.0);
+		B(Post).AddBox(base + FVector(ox, oy, 95.0), FVector(12.0, 12.0, 190.0));
 	}
 	const FColor Goods[3] = { FColor(204,48,48), FColor(232,112,32), FColor(240,208,32) };
 	for (int32 g = 0; g < 3; g++)
-		B(Goods[g]).AddBox(base + FVector(-60.f + g * 60.f, 0, 208.f), FVector(30.f, 30.f, 28.f));
+	{
+		B(Goods[g]).AddBox(base + FVector(-60.0 + g * 60.0, 0.0, 208.0), FVector(30.0, 30.0, 28.0));
+	}
 }
 
 void AMillhavenWorldGen::BuildStructures()
 {
 	// Village houses
-	AddBuilding(-7,   -2,  4.4f, 3.8f, FColor(212,144,96),  FColor(139,56,40));
-	AddBuilding( 6,   -3.5,5.4f, 4.4f, FColor(200,168,96),  FColor(122,51,24));
-	AddBuilding(-6,    6,  4.0f, 3.4f, FColor(184,144,80),  FColor(107,46,20));
-	AddBuilding( 7.5,  6,  4.8f, 4.0f, FColor(208,168,104), FColor(144,60,24));
-	AddBuilding( 0,   -9,  6.0f, 4.5f, FColor(192,136,72),  FColor(160,56,32));
-	AddBuilding(-12,  -5,  3.8f, 3.2f, FColor(184,120,64),  FColor(106,40,16));
+	AddBuilding(-7.f,   -2.f,   4.4f, 3.8f, FColor(212,144,96),  FColor(139,56,40));
+	AddBuilding( 6.f,   -3.5f,  5.4f, 4.4f, FColor(200,168,96),  FColor(122,51,24));
+	AddBuilding(-6.f,    6.f,   4.0f, 3.4f, FColor(184,144,80),  FColor(107,46,20));
+	AddBuilding( 7.5f,   6.f,   4.8f, 4.0f, FColor(208,168,104), FColor(144,60,24));
+	AddBuilding( 0.f,   -9.f,   6.0f, 4.5f, FColor(192,136,72),  FColor(160,56,32));
+	AddBuilding(-12.f,  -5.f,   3.8f, 3.2f, FColor(184,120,64),  FColor(106,40,16));
 
 	// Market stalls
-	AddStall(9, 2); AddStall(11.5f, 4); AddStall(11, 0.5f);
+	AddStall(9.f, 2.f); AddStall(11.5f, 4.f); AddStall(11.f, 0.5f);
 
 	// Well
 	{
-		const FVector w = GroundPos(0, -4.5f, 0.f);
+		const FVector w = GroundPos(0.f, -4.5f, 0.f);
 		B(FColor(128,120,104)).AddCylinder(w, 90.f, 90.f, 52.f, 8);
-		B(FColor(40,112,184)).AddCylinder(w + FVector(0,0,50.f), 72.f, 72.f, 6.f, 8);
-		B(FColor(122,80,40)).AddBox(w + FVector(0,-52.f,105.f), FVector(13.f,13.f,145.f));
-		B(FColor(122,80,40)).AddBox(w + FVector(0, 52.f,105.f), FVector(13.f,13.f,145.f));
-		B(FColor(122,80,40)).AddBox(w + FVector(0,0,179.f), FVector(13.f,126.f,13.f));
+		B(FColor(40,112,184)).AddCylinder(w + FVector(0.0, 0.0, 50.0), 72.f, 72.f, 6.f, 8);
+		B(FColor(122,80,40)).AddBox(w + FVector(0.0, -52.0, 105.0), FVector(13.0, 13.0, 145.0));
+		B(FColor(122,80,40)).AddBox(w + FVector(0.0,  52.0, 105.0), FVector(13.0, 13.0, 145.0));
+		B(FColor(122,80,40)).AddBox(w + FVector(0.0,   0.0, 179.0), FVector(13.0, 126.0, 13.0));
 	}
 
 	// Dock / pier at Shellwater Harbour
 	{
 		const FColor Plank(160,120,74), Leg(122,85,48);
-		const FVector d = GroundPos(-25, 26, 0.f);
-		B(Plank).AddBox(FVector(d.X, d.Y, 28.f), FVector(350.f, 1400.f, 22.f));
+		const FVector d = GroundPos(-25.f, 26.f, 0.f);
+		B(Plank).AddBox(FVector(d.X, d.Y, 28.0), FVector(350.0, 1400.0, 22.0));
 		for (int32 i = 0; i < 5; i++)
-			B(Leg).AddBox(FVector(d.X, d.Y - 600.f + i * 300.f, -90.f), FVector(26.f, 26.f, 250.f));
+		{
+			B(Leg).AddBox(FVector(d.X, d.Y - 600.0 + i * 300.0, -90.0), FVector(26.0, 26.0, 250.0));
+		}
 		// boat hull + mast
-		B(FColor(192,120,64)).AddBox(FVector(d.X + 500.f, d.Y + 400.f, 40.f), FVector(300.f, 600.f, 70.f), 18.f);
-		B(FColor(154,120,80)).AddCylinder(FVector(d.X + 500.f, d.Y + 400.f, 60.f), 8.f, 8.f, 300.f, 4);
+		B(FColor(192,120,64)).AddBox(FVector(d.X + 500.0, d.Y + 400.0, 40.0), FVector(300.0, 600.0, 70.0), 18.f);
+		B(FColor(154,120,80)).AddCylinder(FVector(d.X + 500.0, d.Y + 400.0, 60.0), 8.f, 8.f, 300.f, 4);
 	}
 
 	// Cave entrance (north)
 	{
 		const FColor Rock(96,104,88);
-		const FVector c = GroundPos(-5, -36, 0.f);
-		B(Rock).AddBox(c + FVector(0, -150.f, 190.f), FVector(150.f, 120.f, 380.f));
-		B(Rock).AddBox(c + FVector(0,  150.f, 190.f), FVector(150.f, 120.f, 380.f));
-		B(Rock).AddBox(c + FVector(0, 0, 375.f), FVector(150.f, 440.f, 150.f));
-		B(FColor(6,4,10)).AddBox(c + FVector(78.f, 0, 130.f), FVector(6.f, 240.f, 260.f)); // dark mouth
+		const FVector c = GroundPos(-5.f, -36.f, 0.f);
+		B(Rock).AddBox(c + FVector(0.0, -150.0, 190.0), FVector(150.0, 120.0, 380.0));
+		B(Rock).AddBox(c + FVector(0.0,  150.0, 190.0), FVector(150.0, 120.0, 380.0));
+		B(Rock).AddBox(c + FVector(0.0,    0.0, 375.0), FVector(150.0, 440.0, 150.0));
+		B(FColor(6,4,10)).AddBox(c + FVector(78.0, 0.0, 130.0), FVector(6.0, 240.0, 260.0)); // dark mouth
 		for (int32 i = 0; i < 8; i++)
 		{
 			const float rs = 35.f + Prng(i * 7.f) * 55.f;
-			const float ox = (Prng(i * 13.f) - 0.5f) * 500.f;
-			const float oy = (Prng(i * 7.f) - 0.5f) * 400.f;
-			B(FColor(112,120,96)).AddBox(c + FVector(ox, oy, rs * 0.5f), FVector(rs, rs, rs),
+			const double ox = (Prng(i * 13.f) - 0.5f) * 500.0;
+			const double oy = (Prng(i * 19.f) - 0.5f) * 400.0;
+			B(FColor(112,120,96)).AddBox(c + FVector(ox, oy, rs * 0.5), FVector(rs, rs, rs),
 				Prng(i * 5.f) * 90.f);
 		}
 	}
 
 	// Fences
-	AddFenceRun({ {2.5f,1}, {2.5f,9}, {11,9}, {11,1} });
-	AddFenceRun({ {-14,-1}, {-14,9}, {-10,9} });
+	AddFenceRun({ {2.5, 1.0}, {2.5, 9.0}, {11.0, 9.0}, {11.0, 1.0} });
+	AddFenceRun({ {-14.0, -1.0}, {-14.0, 9.0}, {-10.0, 9.0} });
 
 	// Scattered rocks (solid)
 	for (int32 i = 0; i < 24; i++)
@@ -412,8 +456,8 @@ void AMillhavenWorldGen::AddTree(float AX, float AY, float Scale)
 	{
 		const float r = (145.f - i * 26.f) * s;
 		const float h = (175.f - i * 20.f) * s;
-		const float z = (150.f + i * 105.f) * s;
-		B(Greens[i]).AddCone(base + FVector(0, 0, z), r, h, 6 + i, i * 30.f);
+		const double z = (150.0 + i * 105.0) * s;
+		B(Greens[i]).AddCone(base + FVector(0.0, 0.0, z), r, h, 6 + i, i * 30.f);
 	}
 }
 
@@ -428,15 +472,19 @@ void AMillhavenWorldGen::BuildVegetation()
 		const FVector2D p(FMath::Cos(a) * dist, FMath::Sin(a) * dist);
 		bool tooClose = false;
 		for (const FVector2D& q : placed)
-			if (FVector2D::Distance(p, q) < 2.6f) { tooClose = true; break; }
+		{
+			if (FVector2D::Distance(p, q) < 2.6) { tooClose = true; break; }
+		}
 		if (tooClose) continue;
-		if (p.X < -12.f && p.Y > 20.f) continue; // water
+		if (p.X < -12.0 && p.Y > 20.0) continue; // water
 		placed.Add(p);
-		AddTree(p.X, p.Y, 0.7f + Prng(i * 3.f) * 0.6f);
+		AddTree((float)p.X, (float)p.Y, 0.7f + Prng(i * 3.f) * 0.6f);
 	}
 	// Dense Pinewood cluster (NE)
 	for (int32 i = 0; i < 28; i++)
+	{
 		AddTree(18.f + Prng(i * 11.f) * 25.f, -20.f - Prng(i * 7.f) * 28.f, 0.8f + Prng(i * 3.f) * 0.5f);
+	}
 
 	// Bushes
 	for (int32 i = 0; i < 40; i++)
@@ -446,7 +494,7 @@ void AMillhavenWorldGen::BuildVegetation()
 		const float bx = FMath::Cos(a) * dist, by = FMath::Sin(a) * dist;
 		if (bx < -12.f && by > 18.f) continue;
 		const float r = 30.f + Prng(i * 3.f) * 28.f;
-		B(FColor(36,96,20)).AddBox(GroundPos(bx, by, r * 0.5f), FVector(r, r, r), Prng(i) * 45.f);
+		B(FColor(36,96,20)).AddBox(GroundPos(bx, by, r * 0.5f), FVector(r, r, r), Prng((float)i) * 45.f);
 	}
 	// Flowers
 	const FColor Fl[4] = { FColor(240,48,96), FColor(255,204,0), FColor(255,96,32), FColor(224,32,224) };
@@ -475,7 +523,10 @@ void AMillhavenWorldGen::BuildScenery()
 		const FVector at(FMath::Cos(a) * dist * 100.f, FMath::Sin(a) * dist * 100.f, -500.f);
 		B(MtC[i % 5]).AddCone(at, sz, sz * 0.9f, 5, Prng(i * 3.f) * 180.f);
 		if (Prng(i * 7.f) > 0.4f)
-			B(FColor(232,240,248)).AddCone(at + FVector(0, 0, sz * 0.9f - 200.f), sz * 0.32f, sz * 0.42f, 5);
+		{
+			B(FColor(232,240,248)).AddCone(at + FVector(0.0, 0.0, sz * 0.9 - 200.0),
+				sz * 0.32f, sz * 0.42f, 5);
+		}
 	}
 }
 
@@ -484,41 +535,50 @@ void AMillhavenWorldGen::BuildScenery()
 // ---------------------------------------------------------------------------
 void AMillhavenWorldGen::BuildWater()
 {
-	FMeshBatch W;
-	const FVector c(-30 * 100.f, 32 * 100.f, 5.f);
+	FMillhavenMeshBatch W;
+	const FVector c(-30.0 * 100.0, 32.0 * 100.0, 5.0);
 	W.AddHQuad(c, 4800.f, 4800.f);
-	TArray<FLinearColor> Cols; Cols.Init(FLinearColor(0.16f, 0.44f, 0.72f), W.V.Num());
+	TArray<FLinearColor> Cols;
+	Cols.Init(FLinearColor(0.16f, 0.44f, 0.72f), W.V.Num());
 	WaterMesh->CreateMeshSection_LinearColor(0, W.V, W.T, W.N, W.UV, Cols,
 		TArray<FProcMeshTangent>(), false);
-	UMaterialInstanceDynamic* MID = MakeColorMID(this, FColor(40, 112, 184));
-	MIDs.Add(MID);
-	WaterMesh->SetMaterial(0, MID);
+	if (UMaterialInstanceDynamic* MID = MakeColorMID(FColor(40, 112, 184)))
+	{
+		MIDs.Add(MID);
+		WaterMesh->SetMaterial(0, MID);
+	}
 }
 
 void AMillhavenWorldGen::BuildClouds()
 {
-	FMeshBatch Cl;
+	FMillhavenMeshBatch Cl;
 	for (int32 i = 0; i < 14; i++)
 	{
-		const float cx = (Prng(i * 23.f) - 0.5f) * 16000.f;
-		const float cy = (Prng(i * 31.f) - 0.5f) * 16000.f;
-		const float cz = 1800.f + Prng(i * 5.f) * 1400.f;
+		const double cx = (Prng(i * 23.f) - 0.5f) * 16000.0;
+		const double cy = (Prng(i * 31.f) - 0.5f) * 16000.0;
+		const double cz = 1800.0 + Prng(i * 5.f) * 1400.0;
 		const int32 blobs = 3 + (int32)(Prng(i * 7.f) * 4.f);
 		for (int32 j = 0; j < blobs; j++)
 		{
-			const float r = 250.f + Prng(i * j + 1.f) * 250.f;
-			const FVector bp(cx + (Prng(i * j + 2.f) - 0.5f) * 900.f,
-			                 cy + (Prng(i * j + 4.f) - 0.5f) * 600.f,
-			                 cz + Prng(i * j + 3.f) * 200.f);
+			// Seeds must not collapse when i or j is 0, so mix them with
+			// distinct primes rather than multiplying them together.
+			const float s0 = i * 37.f + j * 11.f;
+			const float r = 250.f + Prng(s0 + 1.f) * 250.f;
+			const FVector bp(cx + (Prng(s0 + 2.f) - 0.5f) * 900.0,
+			                 cy + (Prng(s0 + 4.f) - 0.5f) * 600.0,
+			                 cz + Prng(s0 + 3.f) * 200.0);
 			Cl.AddBox(bp, FVector(r, r, r * 0.7f));
 		}
 	}
-	TArray<FLinearColor> Cols; Cols.Init(FLinearColor(0.98f, 0.99f, 1.f), Cl.V.Num());
+	TArray<FLinearColor> Cols;
+	Cols.Init(FLinearColor(0.98f, 0.99f, 1.f), Cl.V.Num());
 	CloudMesh->CreateMeshSection_LinearColor(0, Cl.V, Cl.T, Cl.N, Cl.UV, Cols,
 		TArray<FProcMeshTangent>(), false);
-	UMaterialInstanceDynamic* MID = MakeColorMID(this, FColor(250, 252, 255));
-	MIDs.Add(MID);
-	CloudMesh->SetMaterial(0, MID);
+	if (UMaterialInstanceDynamic* MID = MakeColorMID(FColor(250, 252, 255)))
+	{
+		MIDs.Add(MID);
+		CloudMesh->SetMaterial(0, MID);
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -534,9 +594,17 @@ void AMillhavenWorldGen::SpawnNPCs()
 	{
 		FActorSpawnParameters P;
 		P.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+		P.Owner = this;
 		const FVector Loc = GroundPos(AX, AY, 0.f);
 		AMillhavenNPC* N = W->SpawnActor<AMillhavenNPC>(AMillhavenNPC::StaticClass(), Loc, FRotator::ZeroRotator, P);
-		if (N) N->Init(Name, Role, Body, Skin, Hair);
+		if (N)
+		{
+			N->Init(Name, Role, Body, Skin, Hair);
+		}
+		else
+		{
+			UE_LOG(LogTemp, Warning, TEXT("Millhaven: failed to spawn NPC '%s'."), *Name);
+		}
 		return N;
 	};
 
@@ -568,7 +636,8 @@ void AMillhavenWorldGen::SpawnNPCs()
 		N->AddOption("start", TEXT("Just exploring. Goodbye!"), "x");
 
 		N->AddNode("wheat", TEXT("Ah - for the festival! My golden wheat is ready and waiting. Head to the north field, take the tallest stalks. You can't miss them - they glow in morning light."));
-		N->AddOption("wheat", TEXT("Thank you, Aldric!"), "x");
+		N->AddOption("wheat", TEXT("Thank you, Aldric!"), "x",
+			TEXT("Get the Wheat"), TEXT("Gather golden wheat from the north field"));
 
 		N->AddNode("farm", TEXT("Twenty-two years on this land. Wheat, barley, pumpkins - and the finest moonmelons in the valley grow near the old creek. Soil here's rich as midnight."));
 		N->AddOption("farm", TEXT("What grows near the cave?"), "cave");
@@ -597,7 +666,8 @@ void AMillhavenWorldGen::SpawnNPCs()
 		N->AddOption("settlers", TEXT("A powerful history. Goodbye."), "x");
 
 		N->AddNode("cave", TEXT("The cave is older than the village. Phosphorescent moss marks the safe passage. Follow only the glowing stones. Whatever you do... do not go past the third chamber after dark."));
-		N->AddOption("cave", TEXT("I'll be careful. Goodbye."), "x");
+		N->AddOption("cave", TEXT("I'll be careful. Goodbye."), "x",
+			TEXT("The Glowing Deep"), TEXT("Find the cave entrance north of the village"));
 	}
 
 	// --- Captain Wren ---
@@ -614,7 +684,8 @@ void AMillhavenWorldGen::SpawnNPCs()
 		N->AddOption("explore", TEXT("Good to know. Goodbye!"), "x");
 
 		N->AddNode("fish", TEXT("Started three nights ago. Fish just vanish from the bay. I heard a low rumbling from under the water - my old boat's timbers shook. Something is down there."));
-		N->AddOption("fish", TEXT("That's alarming. Goodbye."), "x");
+		N->AddOption("fish", TEXT("That's alarming. Goodbye."), "x",
+			TEXT("Trouble in the Bay"), TEXT("Investigate what is scaring the fish at Shellwater Harbour"));
 
 		N->AddNode("cave", TEXT("The cave mouth glows at midnight. Blue light, like starfire. Elder Sylva says it's safe if you follow the moss-lights. I say let sleeping wolves lie."));
 		N->AddOption("cave", TEXT("Good advice. Goodbye."), "x");
@@ -628,13 +699,15 @@ void AMillhavenWorldGen::Tick(float DeltaTime)
 	TimeAccum += DeltaTime;
 
 	if (WaterMesh)
-		WaterMesh->SetRelativeLocation(FVector(0, 0, FMath::Sin(TimeAccum * 0.8f) * 4.f));
+	{
+		WaterMesh->SetRelativeLocation(FVector(0.0, 0.0, FMath::Sin(TimeAccum * 0.8f) * 4.0));
+	}
 
 	if (CloudMesh)
 	{
 		FVector L = CloudMesh->GetRelativeLocation();
-		L.X += DeltaTime * 55.f;
-		if (L.X > 8000.f) L.X = -8000.f;
+		L.X += DeltaTime * 55.0;
+		if (L.X > 8000.0) L.X = -8000.0;
 		CloudMesh->SetRelativeLocation(L);
 	}
 }
