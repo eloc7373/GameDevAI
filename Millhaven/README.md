@@ -7,16 +7,19 @@ in C++ at runtime**, so the project runs from a completely empty level with **no
 imported art assets required**. When you're ready, you drop your own Sketchfab
 models in on top (guide near the bottom).
 
-> **Honest note on build status.** This code has never been compiled — it was
-> written, and later hardened, without a copy of Unreal available. Treat it as a
-> strong starting point, not as guaranteed-clean-on-first-build. Nothing here
-> needs Blueprints.
+> **Build status: compiles clean on UE 5.8.** Verified against the
+> `MillhavenEditor Win64 Development` target with the MSVC 14.44 toolchain —
+> UHT, compile and link all succeed. Nothing here needs Blueprints.
 >
-> A hardening pass has since fixed the defects that were findable by inspection
-> (see [§8](#8-ue-58-hardening-pass)), including one guaranteed compile error and
-> several missing includes. `python3 Tools/check_sources.py` runs the static
-> checks that *are* possible without an engine and currently passes clean. That
-> is a much lower bar than a real compile — expect to still fix a thing or two.
+> **Runtime status: not yet verified.** Compiling is not running. The world
+> geometry, materials, input bindings and NPC dialogue have not been observed
+> working in a live session, so expect to shake out behavioural issues (see
+> [§7](#7-known-limitations--first-tweak-checklist) for the likely ones).
+>
+> Getting to a clean build took a hardening pass over the original draft
+> (see [§8](#8-ue-58-hardening-pass)). `python3 Tools/check_sources.py` runs
+> static checks that need no engine and is worth running before each build —
+> but it is a far weaker signal than an actual compile.
 
 ---
 
@@ -186,14 +189,17 @@ Your procedural props are placeholders. To swap in real art:
 
 ## 8. UE 5.8 hardening pass
 
-Changes made to get the project closer to a clean first build. Nothing here was
-verified by a compiler — see the note at the top.
+Changes made to get the original draft to a clean build on 5.8.
 
 **Would not have compiled**
 
 - `ProcMeshLib.h` declared a global `struct FMeshBatch`. The engine already
   declares `FMeshBatch` (`SceneManagement.h`), which the Engine shared PCH pulls
   in — a guaranteed redefinition error. Renamed to `FMillhavenMeshBatch`.
+- The `SpawnNPCs` lambda took a parameter named `Role`, hiding `AActor::Role`
+  (the replication role). UE builds with warnings-as-errors, so C4458 was fatal.
+  This was the one error the real compiler caught that inspection had missed.
+  `AMillhavenNPC::Role` was renamed to `NpcRole` for the same reason.
 - Added the includes that `EngineIncludeOrderVersion.Latest` (IWYU) requires but
   that nothing pulled in transitively: `GameFramework/Controller.h`,
   `GameFramework/PlayerController.h`, `Camera/PlayerCameraManager.h`,
