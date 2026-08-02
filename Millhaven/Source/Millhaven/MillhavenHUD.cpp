@@ -98,7 +98,12 @@ void AMillhavenHUD::DrawMinimap(AMillhavenCharacter* C)
 
 	const FVector P = C->GetActorLocation();
 	const float cx = X + S * 0.5f, cy = Y + S * 0.5f;
-	const float scale = 0.006f; // world cm -> minimap px
+
+	// World cm -> minimap px, derived from how much world the map should show.
+	// At 0.006 the half-extent covered 125m, so the village (~15m across) and
+	// every NPC collapsed into a dozen pixels at the centre.
+	const float MinimapRadiusM = 45.f;
+	const float scale = (S * 0.5f) / (MinimapRadiusM * 100.f);
 
 	auto Blip = [&](double WorldX, double WorldY, const FLinearColor& Col, float Size)
 	{
