@@ -76,7 +76,7 @@ void AMillhavenNPC::Init(const FString& InName, const FString& InRole,
                          const FColor& BodyColor, const FColor& SkinColor, const FColor& HairColor)
 {
 	NpcName = InName;
-	Role = InRole;
+	NpcRole = InRole;
 
 	if (!BaseMaterial)
 	{

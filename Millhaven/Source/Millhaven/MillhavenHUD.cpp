@@ -154,7 +154,7 @@ void AMillhavenHUD::DrawDialogue(AMillhavenCharacter* C)
 	// portrait swatch
 	Panel(X + 16.f, Y + 16.f, 48.f, 48.f, FLinearColor(0.3f, 0.2f, 0.4f, 1.f));
 	Text(N->NpcName, X + 76.f, Y + 16.f, Gold, 1.15f);
-	Text(N->Role, X + 76.f, Y + 40.f, Dim, 0.8f);
+	Text(N->NpcRole, X + 76.f, Y + 40.f, Dim, 0.8f);
 
 	// body text (wrapped)
 	TArray<FString> Lines = WrapText(Node->Text, 78);

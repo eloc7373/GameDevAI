@@ -589,7 +589,9 @@ void AMillhavenWorldGen::SpawnNPCs()
 	UWorld* W = GetWorld();
 	if (!W) return;
 
-	auto Spawn = [&](float AX, float AY, const FString& Name, const FString& Role,
+	// NOTE: the role parameter must not be called "Role" - that shadows
+	// AActor::Role (the replication role), which is a C4458 error here.
+	auto Spawn = [&](float AX, float AY, const FString& InName, const FString& InRole,
 	                 FColor Body, FColor Skin, FColor Hair) -> AMillhavenNPC*
 	{
 		FActorSpawnParameters P;
@@ -599,11 +601,11 @@ void AMillhavenWorldGen::SpawnNPCs()
 		AMillhavenNPC* N = W->SpawnActor<AMillhavenNPC>(AMillhavenNPC::StaticClass(), Loc, FRotator::ZeroRotator, P);
 		if (N)
 		{
-			N->Init(Name, Role, Body, Skin, Hair);
+			N->Init(InName, InRole, Body, Skin, Hair);
 		}
 		else
 		{
-			UE_LOG(LogTemp, Warning, TEXT("Millhaven: failed to spawn NPC '%s'."), *Name);
+			UE_LOG(LogTemp, Warning, TEXT("Millhaven: failed to spawn NPC '%s'."), *InName);
 		}
 		return N;
 	};

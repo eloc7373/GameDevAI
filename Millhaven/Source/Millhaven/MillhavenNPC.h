@@ -45,7 +45,8 @@ public:
 	void FacePoint(const FVector& WorldPoint);
 
 	FString NpcName;
-	FString Role;
+	/** Named NpcRole, not Role: a plain "Role" would hide AActor::Role. */
+	FString NpcRole;
 
 	/**
 	 * Global registry so the player/HUD can find NPCs without iteration order

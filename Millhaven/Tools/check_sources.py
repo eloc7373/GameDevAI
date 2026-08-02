@@ -39,6 +39,32 @@ ENGINE_RESERVED_TYPES = {
     "FMeshElementCollector", "FPrimitiveViewRelevance", "FMaterial",
 }
 
+# Data members inherited from common engine bases. A parameter or member with
+# one of these names hides the inherited one; UE builds with warnings-as-errors,
+# so a shadowed name is C4458 and fails the build outright.
+#
+# These are per-base, not a flat list: 'Mesh' only shadows something inside an
+# ACharacter, and nothing at all in a free function.
+_ACTOR_MEMBERS = {
+    "Role", "RemoteRole", "Owner", "Instigator", "Children", "RootComponent",
+    "Tags", "InputComponent", "NetDriverName", "ReplicatedMovement",
+    "CustomTimeDilation", "InitialLifeSpan",
+}
+_PAWN_MEMBERS = {"Controller", "PlayerState", "BaseEyeHeight", "AutoPossessPlayer"}
+_CHARACTER_MEMBERS = {"Mesh", "CharacterMovement", "CapsuleComponent"}
+_HUD_MEMBERS = {"Canvas", "DebugCanvas", "PlayerOwner"}
+
+ENGINE_BASE_MEMBERS = {
+    "AActor": _ACTOR_MEMBERS,
+    "APawn": _ACTOR_MEMBERS | _PAWN_MEMBERS,
+    "ACharacter": _ACTOR_MEMBERS | _PAWN_MEMBERS | _CHARACTER_MEMBERS,
+    "AHUD": _ACTOR_MEMBERS | _HUD_MEMBERS,
+    "AController": _ACTOR_MEMBERS | _PAWN_MEMBERS,
+    "APlayerController": _ACTOR_MEMBERS | _PAWN_MEMBERS,
+    "AGameModeBase": _ACTOR_MEMBERS,
+    "AGameMode": _ACTOR_MEMBERS,
+}
+
 # Statements that look like a declaration but are not.
 NON_DECL_KEYWORDS = {
     "if", "for", "while", "switch", "return", "else", "do", "case",
@@ -152,6 +178,89 @@ def check_reserved_types(path: str, code: str, f: Findings) -> None:
         if name in ENGINE_RESERVED_TYPES:
             line = code[:m.start()].count("\n") + 1
             f.error(path, "declares '%s', which collides with an engine type" % name, line)
+
+
+def collect_class_bases(headers_code: dict) -> dict:
+    """Return {our_class_name: set_of_inherited_member_names}."""
+    bases = {}
+    for code in headers_code.values():
+        for m in re.finditer(
+                r'\b(?:class|struct)\s+(?:\w+_API\s+)?(\w+)\s*:\s*public\s+([\w:]+)', code):
+            bases[m.group(1)] = m.group(2)
+
+    resolved = {}
+    for cls in bases:
+        seen, cur = set(), cls
+        while cur in bases and cur not in seen:
+            seen.add(cur)
+            cur = bases[cur]
+        if cur in ENGINE_BASE_MEMBERS:
+            resolved[cls] = ENGINE_BASE_MEMBERS[cur]
+    return resolved
+
+
+def _find_body_span(code: str, open_idx: int):
+    """Given the index of a '{', return the index just past its matching '}'."""
+    depth, i = 0, open_idx
+    while i < len(code):
+        if code[i] == "{":
+            depth += 1
+        elif code[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    return len(code)
+
+
+def check_shadowed_engine_members(path: str, code: str, class_members: dict, f: Findings) -> None:
+    """
+    Flag parameters and data members that hide a member inherited from an
+    engine base. The classic offender is 'Role', which every AActor has.
+
+    Only scanned inside classes that actually inherit the name - a free
+    function's 'Mesh' parameter shadows nothing.
+    """
+    def scan_params(region: str, offset: int, names: set, what: str):
+        if not names:
+            return
+        pattern = re.compile(
+            r'[(,]\s*(?:const\s+)?[A-Za-z_][\w:]*(?:\s*<[^;{}()]*>)?\s*[&*]*\s+(%s)\s*[,)=]'
+            % "|".join(sorted(names))
+        )
+        for m in pattern.finditer(region):
+            line = code[:offset + m.start()].count("\n") + 1
+            f.error(path, "%s parameter '%s' hides an inherited engine member (C4458)"
+                    % (what, m.group(1)), line)
+
+    if path.endswith(".h"):
+        for cls, body in iter_class_bodies(code):
+            names = class_members.get(cls)
+            if not names:
+                continue
+            offset = code.find(body)
+            member_re = re.compile(
+                r'(?:^|;|\{|\})\s*(?:UPROPERTY\s*\([^)]*\)\s*)?'
+                r'(?:mutable\s+|static\s+)?[A-Za-z_][\w:]*(?:\s*<[^;{}()]*>)?\s*[&*]*\s+'
+                r'(%s)\s*(?:=[^;]*)?;' % "|".join(sorted(names))
+            )
+            for m in member_re.finditer(body):
+                line = code[:offset + m.start()].count("\n") + 1
+                f.error(path, "member '%s' hides an inherited engine member" % m.group(1), line)
+            scan_params(body, offset, names, "declared")
+        return
+
+    # In a .cpp, only scan inside out-of-line member function definitions, so
+    # that free helper functions are not judged against a class they aren't in.
+    for m in re.finditer(r'\b(\w+)::~?\w+\s*\(', code):
+        names = class_members.get(m.group(1))
+        if not names:
+            continue
+        brace = code.find("{", m.end())
+        if brace == -1:
+            continue
+        end = _find_body_span(code, brace)
+        scan_params(code[m.start():end], m.start(), names, "member function")
 
 
 def check_generated_body(path: str, code: str, f: Findings) -> None:
@@ -286,16 +395,23 @@ def main() -> int:
     cpps = [x for x in files if x.endswith(".cpp")]
 
     codes = {}
+    raw_text = {}
     for name in headers + cpps:
         path = os.path.join(src, name)
         with open(path, "r", encoding="utf-8") as fh:
             text = fh.read()
-        code = strip_comments_and_strings(text)
-        codes[name] = code
+        raw_text[name] = text
+        codes[name] = strip_comments_and_strings(text)
 
+    # Base classes must be known before the shadowing check can run.
+    class_members = collect_class_bases({h: codes[h] for h in headers})
+
+    for name in headers + cpps:
+        code = codes[name]
         check_balance(name, code, f)
-        check_includes(name, text, all_files, f)
+        check_includes(name, raw_text[name], all_files, f)
         check_reserved_types(name, code, f)
+        check_shadowed_engine_members(name, code, class_members, f)
         if name.endswith(".h"):
             check_generated_body(name, code, f)
 
