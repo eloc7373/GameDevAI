@@ -8,3 +8,6 @@ Saved/
 *.VC.db
 *.opensdf
 *.sdf
+Tools/millhaven-map.svg
+__pycache__/
+*.pyc

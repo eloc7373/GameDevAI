@@ -71,11 +71,29 @@ public:
 	 */
 	static constexpr float MinWaterDepthCm = 20.f;
 
+	// The rectangle BuildWater() tiles, in design metres. Low ground outside it
+	// is simply low ground: the cave hollow in the northern hills sits 3.2m
+	// below the waterline and is bone dry, because no tile is ever laid there.
+	static constexpr float WaterMinAX = -60.f;
+	static constexpr float WaterMaxAX =  -4.f;
+	static constexpr float WaterMinAY =   4.f;
+	static constexpr float WaterMaxAY =  60.f;
+
 	/** True where BuildWater() lays a tile. The one definition of "wet". */
 	static bool IsWaterAt(float AX, float AY)
 	{
+		if (AX < WaterMinAX || AX > WaterMaxAX || AY < WaterMinAY || AY > WaterMaxAY)
+		{
+			return false;
+		}
 		return TerrainHeight(AX * 100.f, AY * 100.f) <= WaterlineCm - MinWaterDepthCm;
 	}
+
+	/** Top surface of the pier decking, UE cm. Things standing on it lift here. */
+	static constexpr float DockDeckTopCm = 39.f;
+
+	/** The moored boat out in the bay - where "Trouble in the Bay" sends you. */
+	static FVector2D BayWatchM() { return FVector2D(-20.0, 30.0); }
 
 	/** The village houses. Single source of truth; see FMillhavenBuildingDef. */
 	static const TArray<FMillhavenBuildingDef>& VillageBuildings();

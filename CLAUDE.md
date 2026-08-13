@@ -115,10 +115,32 @@ not the `.cpp`, which is the single easiest mistake to make without a build.
 `Source/Millhaven/`, confirm the error appears with the right line number, then delete
 it. A rule that silently never matches is worse than no rule, because it is trusted.
 
-The pure maths can also be verified without an engine by porting it to Python and
-checking the numbers — that is how the waterline change was validated (village disc
-flat to 0.0000cm, 469 water tiles emitted, no tile inside the village disc, boardwalk
-landing 31cm below deck height). Worth repeating for any change to `TerrainHeight`.
+Two more engine-free tools, both worth running before any commit that touches the world
+or the dialogue:
+
+```bash
+python3 Millhaven/Tools/verify_worldgen.py   # terrain/water/quest-placement invariants
+python3 Millhaven/Tools/check_dialogue.py    # quest reachability across all NPCs
+python3 Millhaven/Tools/render_map.py        # draws the world to an SVG
+```
+
+`verify_worldgen.py` re-implements `TerrainHeight` and checks the invariants the game
+assumes — the village disc being *exactly* flat, no water tile inside it, the boardwalk
+reaching land within one step height, and **no quest-giver standing inside the arrival
+radius of the quest they hand out**. It re-reads the C++ constants and fails if the
+Python mirror has drifted.
+
+`check_dialogue.py` parses the trees out of `SpawnNPCs()` and searches the whole quest
+state space (72 states currently). It answers the question no single NPC can see:
+can every quest actually be *finished*, and is there a reachable state where a node
+offers the player nothing.
+
+These have already paid for themselves. Between them they caught: `IsWaterAt()`
+returning true for the dry cave hollow, Captain Wren spawning 1m under the waterline,
+"Trouble in the Bay" completing the instant it was given, the opening Everloaf quest
+being unfinishable, and a boardwalk ledge 51cm high — plus, via `render_map.py`, the
+axis-convention mistake above. **None of those were visible by reading the code.**
+Extend these rather than trusting a careful re-read.
 
 ## 4. Coding conventions (observed in the existing C++)
 
@@ -130,6 +152,13 @@ landing 31cm below deck height). Worth repeating for any change to `TerrainHeigh
   load-bearing, not stylistic — see §5 GC hazards. Non-UObject state (`TMap<FName,
   FDlgNode>`, `float TimeAccum`) is a bare member.
 - Member init at the declaration (`float TimeAccum = 0.f;`), not in constructor bodies.
+- **North is −Y. +X is east, +Y is south.** Millhaven kept the screen-space axes of its
+  Three.js prototype; this is *not* UE's usual +X-is-north. `BiomeAt` puts "Northern
+  Hills" at `ay < -28`, the cave commented "(north)" is at y=−36, the cluster commented
+  "(NE)" is +X/−Y, and the basin commented "south-west" is −X/+Y. Consequently a
+  north-up minimap maps world X→screen x and world Y→screen y directly, since screen +y
+  already points down. **That code looks like an axis bug to anyone with UE habits and
+  is not one** — it was "fixed" once and that rotated a correct map 90°. See README §10.
 - **Design coordinates are metres; UE is centimetres.** Helpers take metres and
   multiply by 100 (`GroundPos(AX, AY, LiftCm)`). Sizes passed to `AddBox` are **full
   extents**, not half-extents. Keep this straight — it is the easiest thing to get wrong.

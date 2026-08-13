@@ -13,17 +13,23 @@ against risk.
 > |---|---|
 > | A1 tests, A2 checker, A3 building table, A4 dialogue validator, A5 credits | **Done** |
 > | B1 washed-out colour | **Addressed speculatively** across 3 causes; unconfirmed |
-> | C1 water, C2 minimap, C3 quests, C4 world scoping, C5 wrapping, C7 NPC collision | **Done** |
+> | C1 water, C3 quests, C4 world scoping, C5 wrapping, C7 NPC collision | **Done** |
+> | **C2 minimap rotation** | **WITHDRAWN — the report was wrong, and the "fix" was the bug.** Reverted |
+> | C10 landmark/quest placement, C11 unfinishable opening quest | **Found by new tooling, fixed** |
 > | B2 merge to `main` | **Open — yours** |
 > | B3 Qwen/Unity port | **Deliberately not done** (network dependency, needs runtime) |
 > | B4 save format | **Deliberately not done** (architectural; now more urgent) |
 > | B5 what is this for? | **Open — yours** |
 > | C6 map asset | **Not possible here** (cannot author a `.umap` without an editor) |
 >
-> New item from the water fix: **C9**, below.
+> New items: **C9** (landmarks sit in hollows), **C10**, **C11** — below.
 >
-> The single most valuable thing now is a build result. Everything else is guesswork
-> until the project has been observed running.
+> Three engine-free tools now exist and are worth running before any world or dialogue
+> commit: `verify_worldgen.py`, `check_dialogue.py`, `render_map.py`. They found five
+> bugs that reading the code did not.
+>
+> The single most valuable thing now is still a build result. Everything else is
+> guesswork until the project has been observed running.
 
 File references are to `Millhaven/Source/Millhaven/…` unless stated otherwise, on branch
 `claude/new-session-tl0t6r`.
@@ -168,14 +174,13 @@ either). At the opposite corner the water is only ~14cm deep. The shoreline does
 follow the basin at all. Fix: shrink and reshape the quad to the basin, or clip water
 tiles to `TerrainHeight < waterline`.
 
-**C2. The minimap is rotated 90°** — *confirmed by inspection, small fix*
-`MillhavenHUD.cpp:110-111` maps world X → screen x and world Y → screen y. In UE, +X is
-north and +Y is east; on screen, +y is **down**. So north draws to the right and east
-draws downward — the whole map is rotated 90° clockwise relative to the world. Walking
-north moves your blip's surroundings sideways. Correct mapping for a north-up map:
-`mx = cx + (WorldY - P.Y) * scale; my = cy - (WorldX - P.X) * scale;`
-(Note: the previous session already fixed the minimap *zoom* at `:105`. This is a
-separate axis bug in the same function.)
+**C2. ~~The minimap is rotated 90°~~ — WITHDRAWN, this was my error**
+Filed on the reasoning that UE's +X is north, so mapping X→x and Y→y rotates the map.
+**Millhaven does not use UE's axis convention.** It kept the Three.js prototype's
+screen-space axes: +X east, +Y south, north is −Y. Under that, `MillhavenHUD.cpp:110`
+was already a correct north-up map, and the "fix" rotated it 90°. Reverted, with a
+comment on the code and README §10 so it is not re-broken. Caught only when
+`Tools/render_map.py` drew the world and the harbour appeared in the wrong corner.
 
 **C3. Quests can be started but never completed** — *design gap, not a defect*
 `MillhavenCharacter.cpp:374-378` overwrites `QuestName`/`QuestObjective` when a dialogue
@@ -224,6 +229,20 @@ a depression rather than in a hillside. It reads fine as a sinkhole and nothing 
 broken, so this is a design question rather than a bug: either move the landmarks onto
 features, or add a term that guarantees a rise where a cave mouth is placed. Cheap to
 check now that the maths runs standalone.
+
+**C10. Landmarks and quest placement, found by `verify_worldgen.py`** — *fixed*
+Three real bugs the tool caught that reading the code did not: `IsWaterAt()` called the
+dry cave hollow (3.2m below the waterline, far outside the water box) "water"; Captain
+Wren spawned 1.04m *under* the waterline; and "Trouble in the Bay" completed the instant
+Wren handed it over, because its arrival radius was centred on the dock he stands on.
+The tool now enforces the general invariant — no quest-giver inside the arrival radius
+of their own quest.
+
+**C11. The opening quest could never be completed** — *fixed*
+`check_dialogue.py` searched the quest state space and found "Everloaf", the objective
+seeded in `BeginPlay`, had no completion path at all: the player carried an unfinishable
+entry at the top of the tracker for the whole game. Its text is "explore the village and
+speak to someone", so `OnInteract()` now completes it on the first conversation.
 
 ---
 

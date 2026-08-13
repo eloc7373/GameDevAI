@@ -120,13 +120,19 @@ void AMillhavenHUD::DrawMinimap(AMillhavenCharacter* C)
 	const float MinimapRadiusM = 45.f;
 	const float scale = (S * 0.5f) / (MinimapRadiusM * 100.f);
 
-	// North-up projection. UE's +X is north and +Y is east, while the screen's
-	// +Y runs *down* - so mapping X->x and Y->y (as this used to) rotates the
-	// whole map 90 degrees clockwise against the world.
+	// North-up projection.
+	//
+	// DO NOT "fix" this to the UE default of +X=north. Millhaven inherits the
+	// screen-space convention of its Three.js prototype: **+X is east and +Y is
+	// south**, so -Y is north. Every piece of world content agrees - BiomeAt()
+	// puts "Northern Hills" at ay < -28, the cave marked "(north)" is at
+	// y = -36, the cluster commented "(NE)" is +X/-Y, and the basin commented
+	// "south-west" is -X/+Y. Under that convention X->x and Y->y already *is*
+	// north-up, and rotating it is what breaks the map.
 	auto Blip = [&](double WorldX, double WorldY, const FLinearColor& Col, float Size)
 	{
-		const float mx = cx + (float)((WorldY - P.Y) * scale);
-		const float my = cy - (float)((WorldX - P.X) * scale);
+		const float mx = cx + (float)((WorldX - P.X) * scale);
+		const float my = cy + (float)((WorldY - P.Y) * scale);
 		if (mx > X && mx < X + S && my > Y && my < Y + S)
 		{
 			Panel(mx - Size * 0.5f, my - Size * 0.5f, Size, Size, Col);

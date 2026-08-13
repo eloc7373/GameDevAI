@@ -347,6 +347,11 @@ void AMillhavenCharacter::OnInteract()
 		ActiveNPC = N;
 		CurrentNode = "start";
 		N->FacePoint(GetActorLocation());
+
+		// The opening objective is "explore the village and speak to someone",
+		// so this is the moment it is met. Without it the tracker carries an
+		// unfinishable quest at the top of the list for the whole game.
+		CompleteQuest(FName("Everloaf"));
 	}
 }
 
@@ -514,7 +519,9 @@ void AMillhavenCharacter::UpdateLocationQuests()
 	const FArrival Arrivals[] =
 	{
 		{ FName("GlowingDeep"), AMillhavenWorldGen::CaveMouthM(), 9.f },
-		{ FName("BayTrouble"),  AMillhavenWorldGen::DockM(),     11.f },
+		// The moored boat, not the dock: Captain Wren stands on the dock, so a
+		// dock-centred radius would complete the quest as he gave it out.
+		{ FName("BayTrouble"),  AMillhavenWorldGen::BayWatchM(),  7.f },
 	};
 
 	const FVector L = GetActorLocation();

@@ -323,8 +323,8 @@ player's feet.
 
 ### Other fixes
 
-- **Minimap was rotated 90°.** It mapped world X to screen x and world Y to screen y;
-  UE's +X is north and +Y is east, and screen +y runs *down*. Now north-up.
+- **Minimap orientation: left alone, deliberately.** It was briefly "fixed" to UE's
+  default of +X=north and that was wrong — see §10.
 - **Minimap buildings** read from `AMillhavenWorldGen::VillageBuildings()` instead of a
   second hand-kept copy of the table.
 - **Dialogue text wraps by measured width** (`GetTextSize`) rather than character
@@ -349,5 +349,54 @@ Automation RunTests Millhaven
 shipped once: static UObject pointers, UObject members missing `UPROPERTY()`,
 `CreateDefaultSubobject` on a `UDataAsset`, engine-member shadowing, and LWC
 double→float narrowing.
+
+---
+
+## 10. Which way is north?
+
+**+X is east. +Y is south. So north is −Y.**
+
+This is *not* the Unreal default (where +X is usually treated as north). Millhaven
+inherits screen-space axes from its Three.js prototype, and the whole world is built
+that way. Every piece of content agrees:
+
+| Evidence | Location | Implies |
+|---|---|---|
+| `BiomeAt` → "Northern Hills" | `ay < -28` | −Y is north |
+| `// Cave entrance (north)` | `(-5, -36)` | −Y is north |
+| `// Dense Pinewood cluster (NE)` | `+X`, `−Y` | +X east, −Y north |
+| `// south-west coast basin` | `ax < -18 && ay > 18` | −X west, +Y south |
+| `BiomeAt` → "Shellwater Harbour" | `ax < -18 && ay > 14` | −X/+Y is south-west |
+
+So a north-up minimap maps **world X straight to screen x, and world Y straight to
+screen y** — because screen +y already runs down, which is south. That is what
+`MillhavenHUD.cpp` does, and it is correct.
+
+This is worth stating loudly because the code looks wrong to anyone arriving with UE
+habits: it is exactly the transform you would write if you had forgotten to account for
+north. It was "fixed" once on that reasoning, which rotated a correct map by 90°. The
+mistake surfaced only when `Tools/render_map.py` drew the world and the harbour came
+out in the wrong corner.
+
+If you ever do want UE-standard axes, that is a world-wide change — `BiomeAt`, every
+landmark, every comment — not a minimap change.
+
+## 11. Seeing the world without the editor
+
+```bash
+python3 Tools/render_map.py          # writes Tools/millhaven-map.svg
+python3 Tools/verify_worldgen.py     # terrain/water/quest-placement invariants
+python3 Tools/check_dialogue.py      # quest reachability across all four NPCs
+```
+
+`render_map.py` draws the terrain function, the colour rules and the water test the
+game uses, so you can check the shape of the bay, where the NPCs stand and whether a
+quest sends the player somewhere sane — without launching anything. It is a diagram,
+not a screenshot: no props, no perspective. The SVG is generated, so it is gitignored
+rather than committed.
+
+`check_dialogue.py` parses the trees out of `SpawnNPCs()` and searches the whole quest
+state space. It answers what no single NPC can: **can every quest actually be
+finished**, and is there any reachable state where a node offers the player nothing.
 
 Have fun in Millhaven.

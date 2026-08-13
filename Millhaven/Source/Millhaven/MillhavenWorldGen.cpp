@@ -454,14 +454,27 @@ void AMillhavenWorldGen::BuildStructures()
 		const FColor Plank(160,120,74), Leg(122,85,48);
 		const FVector2D DockAt = DockM();
 		const FVector d = GroundPos((float)DockAt.X, (float)DockAt.Y, 0.f);
-		B(Plank).AddBox(FVector(d.X, d.Y, 28.0), FVector(350.0, 1400.0, 22.0));
+		const double DeckThick = 22.0;
+		const double DeckUnder = (double)DockDeckTopCm - DeckThick;
+		B(Plank).AddBox(FVector(d.X, d.Y, (double)DockDeckTopCm - DeckThick * 0.5),
+			FVector(350.0, 1400.0, DeckThick));
+
+		// Legs run from the bay floor up to the underside of the decking. They
+		// used to be a fixed 2.5m block that both floated and poked through.
 		for (int32 i = 0; i < 5; i++)
 		{
-			B(Leg).AddBox(FVector(d.X, d.Y - 600.0 + i * 300.0, -90.0), FVector(26.0, 26.0, 250.0));
+			const double LegY = d.Y - 600.0 + i * 300.0;
+			const float LegGround = TerrainHeight((float)d.X, (float)LegY);
+			const double LegH = FMath::Max(20.0, DeckUnder - (double)LegGround);
+			B(Leg).AddBox(FVector(d.X, LegY, DeckUnder - LegH * 0.5),
+				FVector(26.0, 26.0, LegH));
 		}
-		// boat hull + mast
-		B(FColor(192,120,64)).AddBox(FVector(d.X + 500.0, d.Y + 400.0, 40.0), FVector(300.0, 600.0, 70.0), 18.f);
-		B(FColor(154,120,80)).AddCylinder(FVector(d.X + 500.0, d.Y + 400.0, 60.0), 8.f, 8.f, 300.f, 4);
+
+		// boat hull + mast, moored at the landmark the bay quest points to
+		const FVector2D BoatAt = BayWatchM();
+		const double BoatX = BoatAt.X * 100.0, BoatY = BoatAt.Y * 100.0;
+		B(FColor(192,120,64)).AddBox(FVector(BoatX, BoatY, 40.0), FVector(300.0, 600.0, 70.0), 18.f);
+		B(FColor(154,120,80)).AddCylinder(FVector(BoatX, BoatY, 60.0), 8.f, 8.f, 300.f, 4);
 
 		// A boardwalk back to dry land. Once the water started following the
 		// terrain the pier became an island - the old water plane covered the
@@ -484,11 +497,32 @@ void AMillhavenWorldGen::BuildStructures()
 
 			const float SpanM = (float)FVector2D::Distance(DockAt, Landfall);
 			const int32 Steps = FMath::Max(1, FMath::CeilToInt(SpanM / 1.2f));
+
+			// The walkway ramps from deck height down to just above the shore.
+			// Held level it would meet the beach as a ~50cm ledge, which is
+			// over UE's 45cm default step height - an invisible wall.
+			const float ShoreGround =
+				TerrainHeight((float)Landfall.X * 100.f, (float)Landfall.Y * 100.f);
+			const double ShoreTop = (double)ShoreGround + 18.0;
+
 			for (int32 s = 0; s <= Steps; s++)
 			{
-				const FVector2D P = FMath::Lerp(DockAt, Landfall, (double)s / (double)Steps);
-				B(Plank).AddBox(FVector(P.X * 100.0, P.Y * 100.0, 28.0),
+				const double T = (double)s / (double)Steps;
+				const FVector2D P = FMath::Lerp(DockAt, Landfall, T);
+				const double TopZ = FMath::Lerp((double)DockDeckTopCm, ShoreTop, T);
+
+				B(Plank).AddBox(FVector(P.X * 100.0, P.Y * 100.0, TopZ - 10.0),
 					FVector(200.0, 200.0, 20.0));
+
+				// A post every other section, so the walkway is not floating.
+				if ((s % 2) == 0)
+				{
+					const float G = TerrainHeight((float)P.X * 100.f, (float)P.Y * 100.f);
+					const double PostTop = TopZ - 20.0;
+					const double PostH = FMath::Max(10.0, PostTop - (double)G);
+					B(Leg).AddBox(FVector(P.X * 100.0, P.Y * 100.0, PostTop - PostH * 0.5),
+						FVector(16.0, 16.0, PostH));
+				}
 			}
 		}
 	}
@@ -632,8 +666,11 @@ void AMillhavenWorldGen::BuildWater()
 	// shoreline anywhere near it.
 	FMillhavenMeshBatch W;
 
-	const float MinAX = -60.f, MaxAX = -4.f;
-	const float MinAY =   4.f, MaxAY = 60.f;
+	// Bounds live on the class so IsWaterAt() answers for the same rectangle
+	// this loop fills - without that it calls any low ground "water", the cave
+	// hollow included.
+	const float MinAX = WaterMinAX, MaxAX = WaterMaxAX;
+	const float MinAY = WaterMinAY, MaxAY = WaterMaxAY;
 	const float TileM = 2.f;
 
 	const int32 NX = FMath::CeilToInt((MaxAX - MinAX) / TileM);
@@ -735,12 +772,12 @@ void AMillhavenWorldGen::SpawnNPCs()
 	// NOTE: the role parameter must not be called "Role" - that shadows
 	// AActor::Role (the replication role), which is a C4458 error here.
 	auto Spawn = [&](float AX, float AY, const FString& InName, const FString& InRole,
-	                 FColor Body, FColor Skin, FColor Hair) -> AMillhavenNPC*
+	                 FColor Body, FColor Skin, FColor Hair, float LiftCm = 0.f) -> AMillhavenNPC*
 	{
 		FActorSpawnParameters P;
 		P.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 		P.Owner = this;
-		const FVector Loc = GroundPos(AX, AY, 0.f);
+		const FVector Loc = GroundPos(AX, AY, LiftCm);
 		AMillhavenNPC* N = W->SpawnActor<AMillhavenNPC>(AMillhavenNPC::StaticClass(), Loc, FRotator::ZeroRotator, P);
 		if (N)
 		{
@@ -871,8 +908,14 @@ void AMillhavenWorldGen::SpawnNPCs()
 	}
 
 	// --- Captain Wren ---
-	if (AMillhavenNPC* N = Spawn(-24.f, 20.f, TEXT("Captain Wren"), TEXT("Harbour Master"),
-		FColor(32,80,128), FColor(232,200,160), FColor(96,56,32)))
+	// On his own pier, at the landward end. At the old spot he stood on the bay
+	// floor a metre under the waterline; putting him at the *seaward* end would
+	// be worse still, because "Trouble in the Bay" completes on arrival at the
+	// moored boat and would finish the instant he handed it over.
+	const float WrenAX = -25.f, WrenAY = 20.f;
+	const float WrenLift = DockDeckTopCm - TerrainHeight(WrenAX * 100.f, WrenAY * 100.f);
+	if (AMillhavenNPC* N = Spawn(WrenAX, WrenAY, TEXT("Captain Wren"), TEXT("Harbour Master"),
+		FColor(32,80,128), FColor(232,200,160), FColor(96,56,32), WrenLift))
 	{
 		N->AddNode("start", TEXT("Ahoy! First time to our little harbour? The fishing's been poor this week - something spooks the catch. Where are you headed, stranger?"));
 		N->AddOption("start", TEXT("Just exploring the valley."), "explore");
