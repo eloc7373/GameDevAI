@@ -13,6 +13,14 @@ easy to make when writing Unreal C++ without an engine to build against:
   4. Unbalanced braces / parens / brackets.
   5. `#include "Local.h"` naming a file that does not exist.
   6. UCLASS types missing GENERATED_BODY().
+  7. Names that shadow a member inherited from an engine base (C4458).
+  8. `static` UObject pointers - invisible to the garbage collector.
+  9. UObject pointer members with no UPROPERTY() - same GC hazard.
+ 10. CreateDefaultSubobject used on a UDataAsset type rather than a component.
+ 11. float initialised from a double-returning LWC helper with no cast (C4244).
+
+Checks 7-11 all exist because the corresponding bug was actually shipped once;
+see CLAUDE.md section 5.
 
 Run:  python3 Tools/check_sources.py
 Exit code is non-zero if any error-level finding is reported.
@@ -263,6 +271,82 @@ def check_shadowed_engine_members(path: str, code: str, class_members: dict, f: 
         scan_params(code[m.start():end], m.start(), names, "member function")
 
 
+# A `static UFoo*` variable - file scope or function local - is a raw UObject
+# pointer the garbage collector cannot see, so the object can be collected out
+# from under it. The fix is always a UPROPERTY() member.
+#
+# The trailing lookahead is what separates a *variable* from a static function
+# that merely returns a pointer: a declarator is followed by '=', ';' or '[',
+# never by '('.
+STATIC_UOBJECT_RE = re.compile(
+    r'\bstatic\s+(?:const\s+)?([UA][A-Z]\w*)\s*\*\s*(\w+)\s*(?=[;=\[])')
+
+# UInputAction and UInputMappingContext are UDataAssets, not components.
+# CreateDefaultSubobject is for CDO component subobjects only.
+CDO_MISUSE_RE = re.compile(
+    r'CreateDefaultSubobject\s*<\s*(UInputAction|UInputMappingContext|UDataAsset)\s*>')
+
+# A whole-statement match for a bare UObject pointer data member.
+UOBJ_PTR_MEMBER_RE = re.compile(
+    r'^(?:mutable\s+)?(?:const\s+)?([UA][A-Z]\w*)\s*\*\s*(\w+)\s*(?:=[^;]*)?$')
+
+# FVector/FVector2D are double-based under LWC, so these all return double.
+LWC_DOUBLE_FUNCS = (
+    "Dist2D", "DistSquared2D", "Size2D", "SizeSquared2D", "Atan2", "Distance",
+)
+
+
+def check_static_uobjects(path: str, code: str, f: Findings) -> None:
+    for m in STATIC_UOBJECT_RE.finditer(code):
+        line = code[:m.start()].count("\n") + 1
+        f.error(path, "static '%s*' is invisible to the GC - use a UPROPERTY() member"
+                % m.group(1), line)
+
+
+def check_cdo_misuse(path: str, code: str, f: Findings) -> None:
+    for m in CDO_MISUSE_RE.finditer(code):
+        line = code[:m.start()].count("\n") + 1
+        f.error(path, "CreateDefaultSubobject<%s> - that is a UDataAsset, use NewObject"
+                % m.group(1), line)
+
+
+def check_uproperty_members(path: str, code: str, f: Findings) -> None:
+    """UObject pointer members must be UPROPERTY() or the GC cannot see them."""
+    if not path.endswith(".h"):
+        return
+    for cls, body in iter_class_bodies(code):
+        body_at = code.find(body)
+        for stmt in split_top_level_statements(body):
+            if "UPROPERTY" in stmt:
+                continue
+            decl = strip_statement_prefixes(stmt)
+            m = UOBJ_PTR_MEMBER_RE.match(decl)
+            if not m:
+                continue
+            # Point at the declarator, not at whatever access label or macro
+            # the statement happens to begin with.
+            stmt_at = body.find(stmt)
+            name_at = stmt.find(m.group(2))
+            at = stmt_at + (name_at if name_at >= 0 else 0)
+            line = code[:body_at + at].count("\n") + 1
+            f.error(path, "%s::%s is a '%s*' with no UPROPERTY() - invisible to the GC"
+                    % (cls, m.group(2), m.group(1)), line)
+
+
+def check_lwc_narrowing(path: str, code: str, f: Findings) -> None:
+    """float x = <something returning double>; is C4244, which is fatal here."""
+    for m in re.finditer(r'\bfloat\s+\w+\s*=\s*([^;]+);', code):
+        init = m.group(1)
+        if "(float)" in init or "float(" in init or "static_cast<float>" in init:
+            continue
+        for fn in LWC_DOUBLE_FUNCS:
+            if re.search(r'\b%s\s*\(' % fn, init):
+                line = code[:m.start()].count("\n") + 1
+                f.warn(path, "float initialised from %s() with no explicit (float) cast (C4244)"
+                       % fn, line)
+                break
+
+
 def check_generated_body(path: str, code: str, f: Findings) -> None:
     for m in re.finditer(r'\bUCLASS\s*\([^)]*\)\s*(?:class|struct)\s+(?:\w+_API\s+)?(\w+)', code):
         name = m.group(1)
@@ -412,6 +496,10 @@ def main() -> int:
         check_includes(name, raw_text[name], all_files, f)
         check_reserved_types(name, code, f)
         check_shadowed_engine_members(name, code, class_members, f)
+        check_static_uobjects(name, code, f)
+        check_cdo_misuse(name, code, f)
+        check_uproperty_members(name, code, f)
+        check_lwc_narrowing(name, code, f)
         if name.endswith(".h"):
             check_generated_body(name, code, f)
 

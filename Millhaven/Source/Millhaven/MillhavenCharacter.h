@@ -13,6 +13,20 @@ class UMaterialInstanceDynamic;
 class UInputAction;
 class UInputMappingContext;
 class AMillhavenNPC;
+struct FDlgOption;
+
+/**
+ * One tracked quest. Identified by a stable FName id so dialogue in two
+ * different NPCs can refer to the same quest; the display strings are free
+ * text the dialogue supplies.
+ */
+struct FMillhavenQuest
+{
+	FName Id;
+	FString Name;
+	FString Objective;
+	bool bComplete = false;
+};
 
 /**
  * Third-person explorer for UE 5.8. Uses Enhanced Input, with all Input Actions
@@ -40,8 +54,27 @@ public:
 	/** How close (cm, 2D) the player must be for the interact prompt to appear. */
 	static constexpr float InteractRangeCm = 320.f;
 
-	FString QuestName = TEXT("The Everloaf");
-	FString QuestObjective = TEXT("Explore the village and speak to someone");
+	// --- Quest tracker ---
+
+	/** Every quest started this session, in the order they were taken. */
+	const TArray<FMillhavenQuest>& GetQuests() const { return Quests; }
+
+	bool IsQuestActive(FName Id) const;
+	bool IsQuestComplete(FName Id) const;
+
+	/** Starts the quest, or retargets its objective if it is already running. */
+	void StartOrUpdateQuest(FName Id, const FString& Name, const FString& Objective);
+	void CompleteQuest(FName Id);
+
+	/** True when an option's requirements pass and it should be offered. */
+	bool IsOptionAvailable(const FDlgOption& Opt) const;
+
+	/**
+	 * Options on the current node that pass their requirements, in the order
+	 * they are displayed. The HUD renders this list and SelectOption() indexes
+	 * into it, so the numbers on screen always match the keys 1-4.
+	 */
+	TArray<const FDlgOption*> GetAvailableOptions() const;
 
 protected:
 	virtual void BeginPlay() override;
@@ -80,6 +113,12 @@ protected:
 	/** Lifts the pawn back onto the terrain if it ever ends up under it. */
 	void EnforceGroundSafety();
 
+	/** Completes any active quest whose landmark the player has reached. */
+	void UpdateLocationQuests();
+
+	FMillhavenQuest* FindQuest(FName Id);
+	const FMillhavenQuest* FindQuest(FName Id) const;
+
 	// Input handlers (Enhanced Input signatures)
 	void MoveForward(const FInputActionValue& Value);
 	void MoveRight(const FInputActionValue& Value);
@@ -98,6 +137,9 @@ protected:
 	// Dialogue
 	UPROPERTY() AMillhavenNPC* ActiveNPC = nullptr;
 	FName CurrentNode = NAME_None;
+
+	/** Plain data, not a UObject - no reflection or GC involvement needed. */
+	TArray<FMillhavenQuest> Quests;
 
 	float WalkPhase = 0.f;
 };

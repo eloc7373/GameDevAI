@@ -204,6 +204,10 @@ void AMillhavenCharacter::BeginPlay()
 	L.Z = AMillhavenWorldGen::TerrainHeight((float)L.X, (float)L.Y) + 120.0;
 	SetActorLocation(L);
 
+	// The opening objective, so the tracker is never empty on a fresh start.
+	StartOrUpdateQuest(FName("Everloaf"), TEXT("The Everloaf"),
+		TEXT("Explore the village and speak to someone"));
+
 	BuildInputAssets();
 	RegisterInputMapping();
 }
@@ -212,12 +216,8 @@ void AMillhavenCharacter::BuildAvatar()
 {
 	if (!BaseMaterial)
 	{
-		BaseMaterial = LoadObject<UMaterialInterface>(nullptr,
-			TEXT("/Engine/BasicShapes/BasicShapeMaterial.BasicShapeMaterial"));
-	}
-	if (!BaseMaterial)
-	{
-		BaseMaterial = UMaterial::GetDefaultMaterial(MD_Surface);
+		// Shared resolution policy - see AMillhavenWorldGen::ResolveBaseMaterial.
+		BaseMaterial = AMillhavenWorldGen::ResolveBaseMaterial();
 	}
 
 	int32 s = 0;
@@ -319,7 +319,10 @@ AMillhavenNPC* AMillhavenCharacter::GetNearbyNPC() const
 	for (const TWeakObjectPtr<AMillhavenNPC>& Weak : AMillhavenNPC::All)
 	{
 		AMillhavenNPC* N = Weak.Get();
-		if (!N)
+		// The registry is process-global. Without the world check an NPC in a
+		// second PIE instance (or an editor preview world) is interactable
+		// from this one.
+		if (!N || N->GetWorld() != GetWorld())
 		{
 			continue;
 		}
@@ -358,34 +361,175 @@ void AMillhavenCharacter::OnOption2() { SelectOption(1); }
 void AMillhavenCharacter::OnOption3() { SelectOption(2); }
 void AMillhavenCharacter::OnOption4() { SelectOption(3); }
 
+// ---------------------------------------------------------------------------
+// Quest tracker
+// ---------------------------------------------------------------------------
+FMillhavenQuest* AMillhavenCharacter::FindQuest(FName Id)
+{
+	return Quests.FindByPredicate([Id](const FMillhavenQuest& Q) { return Q.Id == Id; });
+}
+
+const FMillhavenQuest* AMillhavenCharacter::FindQuest(FName Id) const
+{
+	return Quests.FindByPredicate([Id](const FMillhavenQuest& Q) { return Q.Id == Id; });
+}
+
+bool AMillhavenCharacter::IsQuestActive(FName Id) const
+{
+	const FMillhavenQuest* Q = FindQuest(Id);
+	return Q && !Q->bComplete;
+}
+
+bool AMillhavenCharacter::IsQuestComplete(FName Id) const
+{
+	const FMillhavenQuest* Q = FindQuest(Id);
+	return Q && Q->bComplete;
+}
+
+void AMillhavenCharacter::StartOrUpdateQuest(FName Id, const FString& Name, const FString& Objective)
+{
+	if (Id.IsNone())
+	{
+		return;
+	}
+	if (FMillhavenQuest* Existing = FindQuest(Id))
+	{
+		// Retarget a running quest; a finished one stays finished.
+		if (!Existing->bComplete)
+		{
+			Existing->Name = Name;
+			Existing->Objective = Objective;
+		}
+		return;
+	}
+
+	FMillhavenQuest Q;
+	Q.Id = Id;
+	Q.Name = Name;
+	Q.Objective = Objective;
+	Quests.Add(Q);
+
+	UE_LOG(LogTemp, Log, TEXT("Millhaven: quest started - %s (%s)"), *Name, *Id.ToString());
+}
+
+void AMillhavenCharacter::CompleteQuest(FName Id)
+{
+	FMillhavenQuest* Q = FindQuest(Id);
+	if (!Q || Q->bComplete)
+	{
+		return;
+	}
+	Q->bComplete = true;
+	UE_LOG(LogTemp, Log, TEXT("Millhaven: quest complete - %s"), *Q->Name);
+}
+
+bool AMillhavenCharacter::IsOptionAvailable(const FDlgOption& Opt) const
+{
+	if (!Opt.RequiresQuest.IsNone() && !IsQuestActive(Opt.RequiresQuest))
+	{
+		return false;
+	}
+	if (!Opt.RequiresQuestComplete.IsNone() && !IsQuestComplete(Opt.RequiresQuestComplete))
+	{
+		return false;
+	}
+	if (!Opt.ForbidsQuest.IsNone() && FindQuest(Opt.ForbidsQuest) != nullptr)
+	{
+		return false;
+	}
+	return true;
+}
+
+TArray<const FDlgOption*> AMillhavenCharacter::GetAvailableOptions() const
+{
+	TArray<const FDlgOption*> Out;
+	if (!ActiveNPC)
+	{
+		return Out;
+	}
+	const FDlgNode* Node = ActiveNPC->GetNode(CurrentNode);
+	if (!Node)
+	{
+		return Out;
+	}
+	for (const FDlgOption& Opt : Node->Options)
+	{
+		if (IsOptionAvailable(Opt))
+		{
+			Out.Add(&Opt);
+		}
+	}
+	return Out;
+}
+
 void AMillhavenCharacter::SelectOption(int32 Index)
 {
 	if (!ActiveNPC)
 	{
 		return;
 	}
-	const FDlgNode* Node = ActiveNPC->GetNode(CurrentNode);
-	if (!Node || !Node->Options.IsValidIndex(Index))
+	const TArray<const FDlgOption*> Available = GetAvailableOptions();
+	if (!Available.IsValidIndex(Index))
 	{
 		return;
 	}
 
-	const FDlgOption& Opt = Node->Options[Index];
+	// Copy the whole option before anything else: OnClose() clears ActiveNPC,
+	// which invalidates the node these pointers point into.
+	const FDlgOption Opt = *Available[Index];
+
 	if (!Opt.QuestName.IsEmpty())
 	{
-		QuestName = Opt.QuestName;
-		QuestObjective = Opt.QuestObjective;
+		// An explicit id lets two NPCs advance the same quest; without one the
+		// display name doubles as the id.
+		const FName Id = Opt.QuestId.IsNone() ? FName(*Opt.QuestName) : Opt.QuestId;
+		StartOrUpdateQuest(Id, Opt.QuestName, Opt.QuestObjective);
+	}
+	if (!Opt.CompletesQuest.IsNone())
+	{
+		CompleteQuest(Opt.CompletesQuest);
 	}
 
-	// Copy before OnClose(), which clears ActiveNPC and invalidates Node/Opt.
-	const FName NextNode = Opt.Next;
-	if (NextNode == FName("x") || NextNode == NAME_None)
+	if (Opt.Next == FName("x") || Opt.Next == NAME_None)
 	{
 		OnClose();
 	}
 	else
 	{
-		CurrentNode = NextNode;
+		CurrentNode = Opt.Next;
+	}
+}
+
+// Exploration quests finish by arriving. Landmark positions come from the
+// world generator so they cannot drift away from the geometry.
+void AMillhavenCharacter::UpdateLocationQuests()
+{
+	struct FArrival
+	{
+		FName Id;
+		FVector2D AtM;
+		float RadiusM;
+	};
+
+	const FArrival Arrivals[] =
+	{
+		{ FName("GlowingDeep"), AMillhavenWorldGen::CaveMouthM(), 9.f },
+		{ FName("BayTrouble"),  AMillhavenWorldGen::DockM(),     11.f },
+	};
+
+	const FVector L = GetActorLocation();
+	const FVector2D HereM(L.X / 100.0, L.Y / 100.0);
+
+	for (const FArrival& A : Arrivals)
+	{
+		if (!IsQuestActive(A.Id))
+		{
+			continue;
+		}
+		if ((float)FVector2D::Distance(HereM, A.AtM) <= A.RadiusM)
+		{
+			CompleteQuest(A.Id);
+		}
 	}
 }
 
@@ -411,6 +555,7 @@ void AMillhavenCharacter::Tick(float DeltaTime)
 	Super::Tick(DeltaTime);
 
 	EnforceGroundSafety();
+	UpdateLocationQuests();
 
 	const float Speed = (float)GetVelocity().Size2D();
 	if (Speed > 20.f && !IsInDialogue())

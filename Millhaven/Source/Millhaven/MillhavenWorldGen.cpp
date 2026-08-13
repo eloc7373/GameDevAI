@@ -60,19 +60,47 @@ AMillhavenWorldGen::AMillhavenWorldGen()
 // Uses the "Color" parameter AND fills vertex colors, so the world looks right
 // whether the section renders via the param or via a vertex-color material.
 // ---------------------------------------------------------------------------
+UMaterialInterface* AMillhavenWorldGen::ResolveBaseMaterial()
+{
+	// Every mesh section is coloured two ways at once: a "Color" vector
+	// parameter set on the MID, and per-vertex colours baked into the section.
+	// We cannot know which of the two a given base material actually reads, so
+	// prefer one that reads vertex colour - that is the channel we always
+	// write. Falling through this list is safe: a missing package just loads
+	// as null and we try the next one.
+	static const TCHAR* const Candidates[] =
+	{
+		// 1. The hand-authored material from README section 5, if it was made.
+		TEXT("/Game/M_VertexColor.M_VertexColor"),
+		// 2. An engine material that renders vertex colour straight to base colour.
+		TEXT("/Engine/EngineDebugMaterials/VertexColorViewMode_ColorOnly.VertexColorViewMode_ColorOnly"),
+		// 3. The basic shape material, tinted through its "Color" parameter.
+		TEXT("/Engine/BasicShapes/BasicShapeMaterial.BasicShapeMaterial"),
+	};
+
+	for (const TCHAR* Path : Candidates)
+	{
+		// LOAD_Quiet | LOAD_NoWarn: a miss here is expected, not a problem.
+		UMaterialInterface* Found = LoadObject<UMaterialInterface>(
+			nullptr, Path, nullptr, LOAD_Quiet | LOAD_NoWarn);
+		if (Found)
+		{
+			UE_LOG(LogTemp, Log, TEXT("Millhaven: base material resolved to '%s'."), Path);
+			return Found;
+		}
+	}
+
+	UE_LOG(LogTemp, Warning,
+		TEXT("Millhaven: no usable base material found - the world will render untinted. ")
+		TEXT("See README section 5 for the M_VertexColor workaround."));
+	return UMaterial::GetDefaultMaterial(MD_Surface);
+}
+
 UMaterialInterface* AMillhavenWorldGen::GetBaseMaterial()
 {
 	if (!BaseMaterial)
 	{
-		BaseMaterial = LoadObject<UMaterialInterface>(nullptr,
-			TEXT("/Engine/BasicShapes/BasicShapeMaterial.BasicShapeMaterial"));
-	}
-	if (!BaseMaterial)
-	{
-		UE_LOG(LogTemp, Warning,
-			TEXT("Millhaven: BasicShapeMaterial not found, falling back to the default surface ")
-			TEXT("material. See README section 5 for the M_VertexColor workaround."));
-		BaseMaterial = UMaterial::GetDefaultMaterial(MD_Surface);
+		BaseMaterial = ResolveBaseMaterial();
 	}
 	return BaseMaterial;
 }
@@ -220,11 +248,17 @@ void AMillhavenWorldGen::BuildWorld()
 // ---------------------------------------------------------------------------
 void AMillhavenWorldGen::BuildEnvironmentLighting()
 {
+	// Tuned against the "terrain colour looks washed out" report. Three things
+	// were pushing the image towards flat pale blue at once: a dim sun against
+	// a full-strength sky light (little directional contrast), and ground-level
+	// fog that tinted terrain the player was standing on rather than only the
+	// distance. The sun/sky ratio now favours the sun, and the fog starts 25m
+	// out so near geometry reads its true colour.
 	if (Sun)
 	{
 		Sun->SetWorldRotation(FRotator(-38.f, -55.f, 0.f)); // low, warm angle
 		Sun->SetLightColor(FLinearColor(1.0f, 0.82f, 0.55f));
-		Sun->SetIntensity(6.0f);
+		Sun->SetIntensity(9.0f);         // was 6.0
 		Sun->SetCastShadows(true);
 	}
 	if (Atmosphere)
@@ -235,13 +269,14 @@ void AMillhavenWorldGen::BuildEnvironmentLighting()
 	{
 		Sky->SetMobility(EComponentMobility::Movable);
 		Sky->SetRealTimeCapture(true);   // works with SkyAtmosphere, no baking
-		Sky->SetIntensity(1.0f);
+		Sky->SetIntensity(0.65f);        // was 1.0
 		Sky->RecaptureSky();
 	}
 	if (Fog)
 	{
-		Fog->SetFogDensity(0.008f);
-		Fog->SetFogInscatteringColor(FLinearColor(0.65f, 0.78f, 0.9f));
+		Fog->SetFogDensity(0.004f);      // was 0.008
+		Fog->SetStartDistance(2500.f);   // 25m - was 0, i.e. fog on the player's feet
+		Fog->SetFogInscatteringColor(FLinearColor(0.55f, 0.64f, 0.76f));
 	}
 }
 
@@ -282,7 +317,16 @@ void AMillhavenWorldGen::BuildTerrain()
 
 			FColor Col = ((i + j) & 1) ? Grass : GrassDark;
 			if (avgZ > 380.f) Col = Highland;
-			if (avgZ < 12.f && ax < -16.f && ay > 16.f) Col = Sand; // beach
+
+			// Sand fringes the water, keyed off the same waterline the water
+			// tiles use - so the beach always meets the shore instead of the
+			// two being placed by independent guesses, which is how the old
+			// hardcoded beach ended up nowhere near the old water quad.
+			const float CoastD = FMath::Sqrt(FMath::Square(ax + 18.f) + FMath::Square(ay - 18.f));
+			if (CoastD < 38.f && avgZ < WaterlineCm + 80.f)
+			{
+				Col = Sand;
+			}
 
 			B(Col).AddQuad(A, Bv, C, D);
 		}
@@ -369,15 +413,28 @@ void AMillhavenWorldGen::AddStall(float AX, float AY)
 	}
 }
 
+const TArray<FMillhavenBuildingDef>& AMillhavenWorldGen::VillageBuildings()
+{
+	// Function-local static of plain data - no UObjects here, so unlike the
+	// material caches this one is invisible to the GC in the harmless way.
+	static const TArray<FMillhavenBuildingDef> Defs = {
+		{ FVector2D( -7.0, -2.0), 4.4f, 3.8f, FColor(212,144,96),  FColor(139,56,40) },
+		{ FVector2D(  6.0, -3.5), 5.4f, 4.4f, FColor(200,168,96),  FColor(122,51,24) },
+		{ FVector2D( -6.0,  6.0), 4.0f, 3.4f, FColor(184,144,80),  FColor(107,46,20) },
+		{ FVector2D(  7.5,  6.0), 4.8f, 4.0f, FColor(208,168,104), FColor(144,60,24) },
+		{ FVector2D(  0.0, -9.0), 6.0f, 4.5f, FColor(192,136,72),  FColor(160,56,32) },
+		{ FVector2D(-12.0, -5.0), 3.8f, 3.2f, FColor(184,120,64),  FColor(106,40,16) },
+	};
+	return Defs;
+}
+
 void AMillhavenWorldGen::BuildStructures()
 {
-	// Village houses
-	AddBuilding(-7.f,   -2.f,   4.4f, 3.8f, FColor(212,144,96),  FColor(139,56,40));
-	AddBuilding( 6.f,   -3.5f,  5.4f, 4.4f, FColor(200,168,96),  FColor(122,51,24));
-	AddBuilding(-6.f,    6.f,   4.0f, 3.4f, FColor(184,144,80),  FColor(107,46,20));
-	AddBuilding( 7.5f,   6.f,   4.8f, 4.0f, FColor(208,168,104), FColor(144,60,24));
-	AddBuilding( 0.f,   -9.f,   6.0f, 4.5f, FColor(192,136,72),  FColor(160,56,32));
-	AddBuilding(-12.f,  -5.f,   3.8f, 3.2f, FColor(184,120,64),  FColor(106,40,16));
+	// Village houses. The HUD minimap draws from this same table.
+	for (const FMillhavenBuildingDef& Def : VillageBuildings())
+	{
+		AddBuilding((float)Def.At.X, (float)Def.At.Y, Def.W, Def.D, Def.Wall, Def.Roof);
+	}
 
 	// Market stalls
 	AddStall(9.f, 2.f); AddStall(11.5f, 4.f); AddStall(11.f, 0.5f);
@@ -395,7 +452,8 @@ void AMillhavenWorldGen::BuildStructures()
 	// Dock / pier at Shellwater Harbour
 	{
 		const FColor Plank(160,120,74), Leg(122,85,48);
-		const FVector d = GroundPos(-25.f, 26.f, 0.f);
+		const FVector2D DockAt = DockM();
+		const FVector d = GroundPos((float)DockAt.X, (float)DockAt.Y, 0.f);
 		B(Plank).AddBox(FVector(d.X, d.Y, 28.0), FVector(350.0, 1400.0, 22.0));
 		for (int32 i = 0; i < 5; i++)
 		{
@@ -404,12 +462,42 @@ void AMillhavenWorldGen::BuildStructures()
 		// boat hull + mast
 		B(FColor(192,120,64)).AddBox(FVector(d.X + 500.0, d.Y + 400.0, 40.0), FVector(300.0, 600.0, 70.0), 18.f);
 		B(FColor(154,120,80)).AddCylinder(FVector(d.X + 500.0, d.Y + 400.0, 60.0), 8.f, 8.f, 300.f, 4);
+
+		// A boardwalk back to dry land. Once the water started following the
+		// terrain the pier became an island - the old water plane covered the
+		// whole area, so nothing revealed the gap. The landing point is
+		// searched for rather than hardcoded, using the same "is this wet?"
+		// test BuildWater uses, so the two can never disagree.
+		{
+			const FVector2D Village(0.0, 0.0);
+			FVector2D Landfall = DockAt;
+			const int32 Probes = 80;
+			for (int32 s = 1; s <= Probes; s++)
+			{
+				const FVector2D P = FMath::Lerp(DockAt, Village, (double)s / (double)Probes);
+				Landfall = P;
+				if (!IsWaterAt((float)P.X, (float)P.Y))
+				{
+					break;
+				}
+			}
+
+			const float SpanM = (float)FVector2D::Distance(DockAt, Landfall);
+			const int32 Steps = FMath::Max(1, FMath::CeilToInt(SpanM / 1.2f));
+			for (int32 s = 0; s <= Steps; s++)
+			{
+				const FVector2D P = FMath::Lerp(DockAt, Landfall, (double)s / (double)Steps);
+				B(Plank).AddBox(FVector(P.X * 100.0, P.Y * 100.0, 28.0),
+					FVector(200.0, 200.0, 20.0));
+			}
+		}
 	}
 
 	// Cave entrance (north)
 	{
 		const FColor Rock(96,104,88);
-		const FVector c = GroundPos(-5.f, -36.f, 0.f);
+		const FVector2D CaveAt = CaveMouthM();
+		const FVector c = GroundPos((float)CaveAt.X, (float)CaveAt.Y, 0.f);
 		B(Rock).AddBox(c + FVector(0.0, -150.0, 190.0), FVector(150.0, 120.0, 380.0));
 		B(Rock).AddBox(c + FVector(0.0,  150.0, 190.0), FVector(150.0, 120.0, 380.0));
 		B(Rock).AddBox(c + FVector(0.0,    0.0, 375.0), FVector(150.0, 440.0, 150.0));
@@ -535,9 +623,61 @@ void AMillhavenWorldGen::BuildScenery()
 // ---------------------------------------------------------------------------
 void AMillhavenWorldGen::BuildWater()
 {
+	// A grid of tiles clipped against the terrain, not one big quad.
+	//
+	// The previous version was a hard-edged 48m square at a fixed height. Its
+	// inland corner reached to about (-6m, 8m), which is inside the flat
+	// village disc where TerrainHeight() returns exactly 0 - so a blue plane
+	// sat 5cm above green grass roughly 10m from the village centre, with no
+	// shoreline anywhere near it.
 	FMillhavenMeshBatch W;
-	const FVector c(-30.0 * 100.0, 32.0 * 100.0, 5.0);
-	W.AddHQuad(c, 4800.f, 4800.f);
+
+	const float MinAX = -60.f, MaxAX = -4.f;
+	const float MinAY =   4.f, MaxAY = 60.f;
+	const float TileM = 2.f;
+
+	const int32 NX = FMath::CeilToInt((MaxAX - MinAX) / TileM);
+	const int32 NY = FMath::CeilToInt((MaxAY - MinAY) / TileM);
+
+	auto GroundAtM = [](float AX, float AY)
+	{
+		return TerrainHeight(AX * 100.f, AY * 100.f);
+	};
+
+	for (int32 i = 0; i < NX; i++)
+	{
+		for (int32 j = 0; j < NY; j++)
+		{
+			const float ax0 = MinAX + i * TileM;
+			const float ay0 = MinAY + j * TileM;
+			const float ax1 = ax0 + TileM;
+			const float ay1 = ay0 + TileM;
+
+			const float Highest = FMath::Max(
+				FMath::Max(GroundAtM(ax0, ay0), GroundAtM(ax1, ay0)),
+				FMath::Max(GroundAtM(ax1, ay1), GroundAtM(ax0, ay1)));
+
+			if (Highest > WaterlineCm - MinWaterDepthCm)
+			{
+				continue; // shore or dry land
+			}
+
+			const double Z = (double)WaterlineCm;
+			W.AddQuad(
+				FVector(ax0 * 100.0, ay0 * 100.0, Z),
+				FVector(ax1 * 100.0, ay0 * 100.0, Z),
+				FVector(ax1 * 100.0, ay1 * 100.0, Z),
+				FVector(ax0 * 100.0, ay1 * 100.0, Z));
+		}
+	}
+
+	if (W.V.Num() == 0)
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("Millhaven: no water tiles cleared the waterline - the bay will be dry."));
+		return;
+	}
+
 	TArray<FLinearColor> Cols;
 	Cols.Init(FLinearColor(0.16f, 0.44f, 0.72f), W.V.Num());
 	WaterMesh->CreateMeshSection_LinearColor(0, W.V, W.T, W.N, W.UV, Cols,
@@ -589,6 +729,9 @@ void AMillhavenWorldGen::SpawnNPCs()
 	UWorld* W = GetWorld();
 	if (!W) return;
 
+	// Collected so every dialogue tree can be checked once they are all built.
+	TArray<AMillhavenNPC*> Spawned;
+
 	// NOTE: the role parameter must not be called "Role" - that shadows
 	// AActor::Role (the replication role), which is a C4458 error here.
 	auto Spawn = [&](float AX, float AY, const FString& InName, const FString& InRole,
@@ -602,6 +745,7 @@ void AMillhavenWorldGen::SpawnNPCs()
 		if (N)
 		{
 			N->Init(InName, InRole, Body, Skin, Hair);
+			Spawned.Add(N);
 		}
 		else
 		{
@@ -624,8 +768,37 @@ void AMillhavenWorldGen::SpawnNPCs()
 		N->AddOption("festival", TEXT("Sounds wonderful, goodbye!"), "x");
 
 		N->AddNode("accept", TEXT("Wonderful! Aldric's east of the well - look for the green overalls. Bring me five bundles and I'll bake you something you won't soon forget!"));
-		N->AddOption("accept", TEXT("I'll find him right away!"), "x",
-			TEXT("Get the Wheat"), TEXT("Find Farmer Aldric east of the well"));
+		{
+			FDlgOption Opt;
+			Opt.Label = TEXT("I'll find him right away!");
+			Opt.Next = "x";
+			Opt.QuestId = "GetWheat";
+			Opt.QuestName = TEXT("Get the Wheat");
+			Opt.QuestObjective = TEXT("Find Farmer Aldric east of the well");
+			// Cannot be taken twice, and disappears once Aldric hands it over.
+			Opt.ForbidsQuest = "GetWheat";
+			N->AddOption("accept", Opt);
+		}
+		// Unconditional, so the node still has something to pick once the
+		// option above has been used up. Every gated node needs one of these.
+		N->AddOption("accept", TEXT("Goodbye, Maren."), "x");
+
+		// The return leg: only offered once Aldric has sent you back.
+		{
+			FDlgOption Opt;
+			Opt.Label = TEXT("I have your golden wheat.");
+			Opt.Next = "delivered";
+			Opt.RequiresQuest = "DeliverWheat";
+			N->AddOption("start", Opt);
+		}
+		N->AddNode("delivered", TEXT("Five bundles, and every stalk gold as a summer evening! Bless you, traveler. The Everloaf will rise higher than the chapel door this year - and the first slice is yours."));
+		{
+			FDlgOption Opt;
+			Opt.Label = TEXT("Happy to help. Enjoy the festival!");
+			Opt.Next = "x";
+			Opt.CompletesQuest = "DeliverWheat";
+			N->AddOption("delivered", Opt);
+		}
 	}
 
 	// --- Farmer Aldric ---
@@ -633,13 +806,30 @@ void AMillhavenWorldGen::SpawnNPCs()
 		FColor(80,136,40), FColor(232,192,144), FColor(96,56,24)))
 	{
 		N->AddNode("start", TEXT("Morning! Fine weather for crops. Name's Aldric. I've been up since before the sun. What brings you to my corner of Millhaven?"));
-		N->AddOption("start", TEXT("Maren sent me for wheat."), "wheat");
+		// Only comes up once Maren has actually asked for the wheat.
+		{
+			FDlgOption Opt;
+			Opt.Label = TEXT("Maren sent me for wheat.");
+			Opt.Next = "wheat";
+			Opt.RequiresQuest = "GetWheat";
+			N->AddOption("start", Opt);
+		}
 		N->AddOption("start", TEXT("Tell me about your farm."), "farm");
 		N->AddOption("start", TEXT("Just exploring. Goodbye!"), "x");
 
-		N->AddNode("wheat", TEXT("Ah - for the festival! My golden wheat is ready and waiting. Head to the north field, take the tallest stalks. You can't miss them - they glow in morning light."));
-		N->AddOption("wheat", TEXT("Thank you, Aldric!"), "x",
-			TEXT("Get the Wheat"), TEXT("Gather golden wheat from the north field"));
+		N->AddNode("wheat", TEXT("Ah - for the festival! My golden wheat is ready and waiting. Here - five bundles, cut this morning and still warm. Take them straight back to Maren before the dew lifts."));
+		{
+			// Hands the first quest off to the second, so the pair reads as one
+			// errand across two NPCs.
+			FDlgOption Opt;
+			Opt.Label = TEXT("Thank you, Aldric!");
+			Opt.Next = "x";
+			Opt.CompletesQuest = "GetWheat";
+			Opt.QuestId = "DeliverWheat";
+			Opt.QuestName = TEXT("Deliver the Wheat");
+			Opt.QuestObjective = TEXT("Bring the golden wheat back to Baker Maren");
+			N->AddOption("wheat", Opt);
+		}
 
 		N->AddNode("farm", TEXT("Twenty-two years on this land. Wheat, barley, pumpkins - and the finest moonmelons in the valley grow near the old creek. Soil here's rich as midnight."));
 		N->AddOption("farm", TEXT("What grows near the cave?"), "cave");
@@ -668,8 +858,16 @@ void AMillhavenWorldGen::SpawnNPCs()
 		N->AddOption("settlers", TEXT("A powerful history. Goodbye."), "x");
 
 		N->AddNode("cave", TEXT("The cave is older than the village. Phosphorescent moss marks the safe passage. Follow only the glowing stones. Whatever you do... do not go past the third chamber after dark."));
-		N->AddOption("cave", TEXT("I'll be careful. Goodbye."), "x",
-			TEXT("The Glowing Deep"), TEXT("Find the cave entrance north of the village"));
+		{
+			// Completed by arriving - see AMillhavenCharacter::UpdateLocationQuests.
+			FDlgOption Opt;
+			Opt.Label = TEXT("I'll be careful. Goodbye.");
+			Opt.Next = "x";
+			Opt.QuestId = "GlowingDeep";
+			Opt.QuestName = TEXT("The Glowing Deep");
+			Opt.QuestObjective = TEXT("Find the cave entrance north of the village");
+			N->AddOption("cave", Opt);
+		}
 	}
 
 	// --- Captain Wren ---
@@ -686,11 +884,26 @@ void AMillhavenWorldGen::SpawnNPCs()
 		N->AddOption("explore", TEXT("Good to know. Goodbye!"), "x");
 
 		N->AddNode("fish", TEXT("Started three nights ago. Fish just vanish from the bay. I heard a low rumbling from under the water - my old boat's timbers shook. Something is down there."));
-		N->AddOption("fish", TEXT("That's alarming. Goodbye."), "x",
-			TEXT("Trouble in the Bay"), TEXT("Investigate what is scaring the fish at Shellwater Harbour"));
+		{
+			// Also completed by arriving, at the dock.
+			FDlgOption Opt;
+			Opt.Label = TEXT("That's alarming. Goodbye.");
+			Opt.Next = "x";
+			Opt.QuestId = "BayTrouble";
+			Opt.QuestName = TEXT("Trouble in the Bay");
+			Opt.QuestObjective = TEXT("Investigate what is scaring the fish at Shellwater Harbour");
+			N->AddOption("fish", Opt);
+		}
 
 		N->AddNode("cave", TEXT("The cave mouth glows at midnight. Blue light, like starfire. Elder Sylva says it's safe if you follow the moss-lights. I say let sleeping wolves lie."));
 		N->AddOption("cave", TEXT("Good advice. Goodbye."), "x");
+	}
+
+	// Every tree is complete now, so dangling targets and unreachable nodes
+	// show up in the log on the first run rather than in play.
+	for (const AMillhavenNPC* N : Spawned)
+	{
+		N->ValidateDialogue();
 	}
 }
 

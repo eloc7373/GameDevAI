@@ -12,17 +12,7 @@ static const FLinearColor PanelBg(0.05f, 0.03f, 0.01f, 0.82f);
 static const FLinearColor Gold(0.96f, 0.75f, 0.19f, 1.f);
 static const FLinearColor TextCol(0.9f, 0.86f, 0.78f, 1.f);
 static const FLinearColor Dim(0.6f, 0.6f, 0.6f, 1.f);
-
-// Village building footprints in design metres, kept in sync with the
-// AddBuilding() calls in MillhavenWorldGen::BuildStructures().
-static const FVector2D VillageBuildings[] = {
-	{ -7.0,  -2.0 },
-	{  6.0,  -3.5 },
-	{ -6.0,   6.0 },
-	{  7.5,   6.0 },
-	{  0.0,  -9.0 },
-	{ -12.0, -5.0 },
-};
+static const FLinearColor DoneCol(0.55f, 0.82f, 0.45f, 1.f);
 
 void AMillhavenHUD::Panel(float X, float Y, float W, float H, const FLinearColor& Col)
 {
@@ -35,22 +25,32 @@ void AMillhavenHUD::Text(const FString& S, float X, float Y, const FLinearColor&
 	DrawText(S, Col, X, Y, Font, Scale);
 }
 
-TArray<FString> AMillhavenHUD::WrapText(const FString& S, int32 MaxChars)
+TArray<FString> AMillhavenHUD::WrapText(const FString& S, float MaxWidthPx, float Scale)
 {
+	UFont* Font = GEngine ? GEngine->GetMediumFont() : nullptr;
+
 	TArray<FString> Lines;
 	TArray<FString> Words;
 	S.ParseIntoArray(Words, TEXT(" "), true);
+
 	FString Line;
 	for (const FString& W : Words)
 	{
-		if (!Line.IsEmpty() && Line.Len() + W.Len() + 1 > MaxChars)
+		const FString Candidate = Line.IsEmpty() ? W : Line + TEXT(" ") + W;
+
+		float TextW = 0.f, TextH = 0.f;
+		GetTextSize(Candidate, TextW, TextH, Font, Scale);
+
+		// A single word wider than the panel still has to go somewhere, so only
+		// break when there is already something on the line to keep.
+		if (!Line.IsEmpty() && TextW > MaxWidthPx)
 		{
 			Lines.Add(Line);
 			Line = W;
 		}
 		else
 		{
-			Line = Line.IsEmpty() ? W : Line + TEXT(" ") + W;
+			Line = Candidate;
 		}
 	}
 	if (!Line.IsEmpty()) Lines.Add(Line);
@@ -81,12 +81,27 @@ void AMillhavenHUD::DrawHUD()
 
 void AMillhavenHUD::DrawQuestPanel(AMillhavenCharacter* C)
 {
-	const float X = 24.f, Y = 24.f, W = 320.f, H = 96.f;
+	const TArray<FMillhavenQuest>& Quests = C->GetQuests();
+
+	const float X = 24.f, Y = 24.f, W = 340.f;
+	const float RowH = 42.f;
+	const float H = 34.f + RowH * (float)FMath::Max(1, Quests.Num());
+
 	Panel(X, Y, W, H, PanelBg);
 	Panel(X, Y, W, 3.f, Gold);
 	Text(TEXT("QUESTS"), X + 14.f, Y + 10.f, Gold, 1.1f);
-	Text(FString(TEXT("- ")) + C->QuestName, X + 14.f, Y + 36.f, TextCol, 1.0f);
-	Text(FString(TEXT("Objective: ")) + C->QuestObjective, X + 14.f, Y + 60.f, Dim, 0.85f);
+
+	float ty = Y + 36.f;
+	for (const FMillhavenQuest& Q : Quests)
+	{
+		const FString Head = FString::Printf(TEXT("%s %s"),
+			Q.bComplete ? TEXT("[x]") : TEXT("[ ]"), *Q.Name);
+		Text(Head, X + 14.f, ty, Q.bComplete ? DoneCol : TextCol, 1.0f);
+
+		const FString Sub = Q.bComplete ? FString(TEXT("Complete")) : Q.Objective;
+		Text(Sub, X + 32.f, ty + 19.f, Dim, 0.8f);
+		ty += RowH;
+	}
 }
 
 void AMillhavenHUD::DrawMinimap(AMillhavenCharacter* C)
@@ -105,25 +120,31 @@ void AMillhavenHUD::DrawMinimap(AMillhavenCharacter* C)
 	const float MinimapRadiusM = 45.f;
 	const float scale = (S * 0.5f) / (MinimapRadiusM * 100.f);
 
+	// North-up projection. UE's +X is north and +Y is east, while the screen's
+	// +Y runs *down* - so mapping X->x and Y->y (as this used to) rotates the
+	// whole map 90 degrees clockwise against the world.
 	auto Blip = [&](double WorldX, double WorldY, const FLinearColor& Col, float Size)
 	{
-		const float mx = cx + (float)((WorldX - P.X) * scale);
-		const float my = cy + (float)((WorldY - P.Y) * scale);
+		const float mx = cx + (float)((WorldY - P.Y) * scale);
+		const float my = cy - (float)((WorldX - P.X) * scale);
 		if (mx > X && mx < X + S && my > Y && my < Y + S)
 		{
 			Panel(mx - Size * 0.5f, my - Size * 0.5f, Size, Size, Col);
 		}
 	};
 
-	// buildings
-	for (const FVector2D& b : VillageBuildings)
+	// buildings - read from the generator's table, not a second hand-kept copy
+	for (const FMillhavenBuildingDef& B : AMillhavenWorldGen::VillageBuildings())
 	{
-		Blip(b.X * 100.0, b.Y * 100.0, FLinearColor(0.78f, 0.44f, 0.25f, 1.f), 6.f);
+		Blip(B.At.X * 100.0, B.At.Y * 100.0, FLinearColor(0.78f, 0.44f, 0.25f, 1.f), 6.f);
 	}
 	// NPCs
 	for (const TWeakObjectPtr<AMillhavenNPC>& Weak : AMillhavenNPC::All)
 	{
-		if (const AMillhavenNPC* N = Weak.Get())
+		const AMillhavenNPC* N = Weak.Get();
+		// The registry is process-global, so an NPC from another PIE world can
+		// appear in it. Only draw the ones in this HUD's world.
+		if (N && N->GetWorld() == GetWorld())
 		{
 			const FVector L = N->GetActorLocation();
 			Blip(L.X, L.Y, FLinearColor(1.f, 0.2f, 0.2f, 1.f), 6.f);
@@ -161,8 +182,8 @@ void AMillhavenHUD::DrawDialogue(AMillhavenCharacter* C)
 	Text(N->NpcName, X + 76.f, Y + 16.f, Gold, 1.15f);
 	Text(N->NpcRole, X + 76.f, Y + 40.f, Dim, 0.8f);
 
-	// body text (wrapped)
-	TArray<FString> Lines = WrapText(Node->Text, 78);
+	// body text (wrapped to the panel's inner width)
+	TArray<FString> Lines = WrapText(Node->Text, W - 40.f, 0.92f);
 	float ty = Y + 74.f;
 	for (const FString& L : Lines)
 	{
@@ -170,11 +191,14 @@ void AMillhavenHUD::DrawDialogue(AMillhavenCharacter* C)
 		ty += 20.f;
 	}
 
-	// options
+	// Options come from the character so the numbers shown here are exactly
+	// the ones SelectOption() indexes - requirement-gated options are filtered
+	// out of both by the same call.
+	const TArray<const FDlgOption*> Options = C->GetAvailableOptions();
 	float oy = ty + 8.f;
-	for (int32 i = 0; i < Node->Options.Num(); i++)
+	for (int32 i = 0; i < Options.Num(); i++)
 	{
-		const FString Line = FString::Printf(TEXT("[%d]  %s"), i + 1, *Node->Options[i].Label);
+		const FString Line = FString::Printf(TEXT("[%d]  %s"), i + 1, *Options[i]->Label);
 		Text(Line, X + 24.f, oy, FLinearColor(0.85f, 0.85f, 0.85f, 1.f), 0.9f);
 		oy += 20.f;
 	}

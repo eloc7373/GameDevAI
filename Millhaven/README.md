@@ -16,6 +16,13 @@ models in on top (guide near the bottom).
 > working in a live session, so expect to shake out behavioural issues (see
 > [§7](#7-known-limitations--first-tweak-checklist) for the likely ones).
 >
+> **The changes in [§9](#9-quests-water-and-the-washed-out-colour-pass) have not
+> been compiled either.** They were written against the engine API without a
+> build to check them; `Tools/check_sources.py` and the new Automation Specs
+> raise the odds but prove nothing. If the module fails to compile, start with
+> `Source/Millhaven/MillhavenTests.cpp` — it is self-contained and deleting it
+> costs nothing but the tests.
+>
 > Getting to a clean build took a hardening pass over the original draft
 > (see [§8](#8-ue-58-hardening-pass)). `python3 Tools/check_sources.py` runs
 > static checks that need no engine and is worth running before each build —
@@ -103,21 +110,37 @@ Everything lives in `Source/Millhaven/`:
   calls in `BuildStructures()`. `ax, ay` are metres from the village centre.
 - **Edit dialogue:** in `SpawnNPCs()`, each NPC is a set of `AddNode` +
   `AddOption` calls. `"x"` closes the conversation; the two trailing strings on an
-  option set the quest name/objective.
+  option set the quest name/objective. For options that need requirements or that
+  finish a quest, fill in an `FDlgOption` and pass it to the second `AddOption`
+  overload — see §9.
+- **Controls:** every node needs at least one option with no requirements on it, or
+  the player can reach a state where nothing is offered. `ValidateDialogue()` warns
+  about this on startup, along with dangling and unreachable nodes.
 - **Terrain shape:** `TerrainHeight()` is one pure function — tweak the sine terms
   to reshape hills/coast. Object placement follows it automatically.
 
 ## 5. Colors look wrong? (materials)
 
-The world colours meshes two ways at once for safety: it tints the engine's
-`BasicShapeMaterial` **and** writes vertex colours. If everything renders a flat
-grey/white on your build, make a one-time material:
+The world colours meshes two ways at once for safety: it tints a base material's
+`Color` parameter **and** writes vertex colours.
 
-1. Content Browser → **Add → Material**, name it `M_VertexColor`.
+`AMillhavenWorldGen::ResolveBaseMaterial()` picks the base material at runtime, trying
+these in order and logging which one won:
+
+1. `/Game/M_VertexColor` — your own material, if you have made one.
+2. `/Engine/EngineDebugMaterials/VertexColorViewMode_ColorOnly` — an engine material
+   that renders vertex colour straight to base colour.
+3. `/Engine/BasicShapes/BasicShapeMaterial` — tinted through its `Color` parameter.
+
+**Check the Output Log for `Millhaven: base material resolved to ...` before debugging
+anything colour-related.** If it landed on option 3 and the world still looks wrong,
+that material's `Color` parameter is not driving base colour on your build — make your
+own and it will be picked up automatically next run:
+
+1. Content Browser → **Add → Material**, name it `M_VertexColor`, save it at the
+   Content root so its path is `/Game/M_VertexColor`.
 2. Open it, add a **Vertex Color** node, plug its **RGB** into **Base Color**, save.
-3. In `MakeColorMID` / `CharColorMID` / the NPC helper, change the loaded path from
-   `/Engine/BasicShapes/BasicShapeMaterial.BasicShapeMaterial` to
-   `/Game/M_VertexColor.M_VertexColor`. Rebuild.
+3. Press Play. No code change needed — option 1 now resolves.
 
 ## 6. Dropping in your Sketchfab models
 
@@ -179,6 +202,9 @@ Your procedural props are placeholders. To swap in real art:
   `Mesh->bUseAsyncCooking = true` in the `AMillhavenWorldGen` constructor.
 - **Trees are walk-through** (decorative, no collision) so you never snag on
   foliage. Add collision later per the asset-swap section if you want solid trunks.
+  NPCs, by contrast, are solid — each carries a capsule on the `Pawn` profile.
+- **Water has no collision**, so you wade through the bay rather than swim. The
+  terrain under it is solid, so you walk along the lake bed.
 - **Sky/lighting** uses a real-time Sky Light + Sky Atmosphere. If the sky is
   black, add a **Sky Atmosphere** actor to the level manually, or lower reliance on
   real-time capture in `BuildEnvironmentLighting()`.
@@ -244,5 +270,84 @@ Changes made to get the original draft to a clean build on 5.8.
   `GENERATED_BODY()`. Run it before you build; exit code is non-zero on error.
 - `Tools/create_millhaven_map.py` — creates `Content/Maps/Millhaven` so you can
   skip the manual level-creation step.
+
+---
+
+## 9. Quests, water, and the washed-out colour pass
+
+A later pass, written **without an engine to compile against** — see the build-status
+note at the top before trusting any of it.
+
+### Quests actually finish now
+
+Previously the tracker held one quest name and one objective string, both overwritten
+by whichever dialogue option was picked last, with no way to complete anything.
+
+- `FMillhavenQuest` (id, name, objective, complete flag); the player holds an array.
+- Dialogue options can **start**, **retarget** and **complete** quests by id, and can
+  be **gated** on quest state via `RequiresQuest`, `RequiresQuestComplete` and
+  `ForbidsQuest`.
+- `GetAvailableOptions()` filters the current node once, and both the HUD and
+  `SelectOption()` read it — so the numbers on screen always match the keys 1-4.
+- The wheat errand is now a real two-NPC chain: Maren asks → Aldric hands it over
+  (`GetWheat` completes, `DeliverWheat` starts) → Maren thanks you (`DeliverWheat`
+  completes). Her acceptance line disappears once taken.
+- The two exploration quests complete **by arriving** — walk to the cave mouth or the
+  dock. Landmark positions come from `AMillhavenWorldGen::CaveMouthM()` / `DockM()`,
+  which also place the geometry.
+- The HUD lists every quest with `[ ]` / `[x]` and grows to fit.
+
+### The water has a shoreline
+
+The bay was one hard-edged 48m square at a fixed height. Its inland corner reached into
+the flat village disc, where the ground is exactly `z=0` and the water sat at `z=+5` —
+a blue plane 5cm above green grass, about 10m from the village centre.
+
+It is now a 2m tile grid clipped against the terrain: a tile is emitted only where the
+ground clears the waterline by `MinWaterDepthCm`. `IsWaterAt()` is the single
+definition of "wet", and the sand fringe in `BuildTerrain()` keys off the same
+waterline, so beach and water cannot drift apart.
+
+One consequence: with a real shoreline the pier became an island, which the old
+all-covering plane had hidden. `BuildStructures()` now searches along the line from the
+dock toward the village for the first dry spot and lays a boardwalk to it — using the
+same `IsWaterAt()` test, so it always lands on the shore the player can see.
+
+### Colour
+
+Three things were flattening the image at once, and the fix hedges across all of them
+rather than betting on one: the base material is now resolved from a preference list
+(§5), the sun/sky ratio moved from 6.0/1.0 to 9.0/0.65, and the height fog dropped to
+half density with a 25m start distance so it no longer tints the ground under the
+player's feet.
+
+### Other fixes
+
+- **Minimap was rotated 90°.** It mapped world X to screen x and world Y to screen y;
+  UE's +X is north and +Y is east, and screen +y runs *down*. Now north-up.
+- **Minimap buildings** read from `AMillhavenWorldGen::VillageBuildings()` instead of a
+  second hand-kept copy of the table.
+- **Dialogue text wraps by measured width** (`GetTextSize`) rather than character
+  count, which overflowed the panel with a proportional font.
+- **The NPC registry is world-scoped** — a second PIE instance no longer leaks NPCs
+  into the first one's interact range and minimap.
+- **`ValidateDialogue()`** logs dangling targets, unreachable nodes, and nodes whose
+  every option is gated.
+
+### Tests
+
+`Source/Millhaven/MillhavenTests.cpp` — Automation Specs over the pure functions:
+terrain flatness and determinism, the waterline invariants (including the village-flood
+regression), biome boundaries, geometry vertex/triangle counts and winding, the village
+table, and the PRNG seed-collapse regression.
+
+```
+Automation RunTests Millhaven
+```
+
+`Tools/check_sources.py` also grew five checks, each for a bug this project actually
+shipped once: static UObject pointers, UObject members missing `UPROPERTY()`,
+`CreateDefaultSubobject` on a `UDataAsset`, engine-member shadowing, and LWC
+double→float narrowing.
 
 Have fun in Millhaven.

@@ -1,7 +1,29 @@
 # Millhaven — candidate backlog
 
-Proposed 2026-08-13 from the reconnaissance pass. **Nothing here is started.** Ranked
-within each bucket by value against risk.
+Proposed 2026-08-13 from the reconnaissance pass. Ranked within each bucket by value
+against risk.
+
+> ## Status — updated 2026-08-13, build pass
+>
+> Approval was skipped: "just go for it and build all the ideas and updates yourself."
+> Most of this list is now **written but uncompiled** — see
+> `journal/2026-08-13-build-pass.md`.
+>
+> | Item | State |
+> |---|---|
+> | A1 tests, A2 checker, A3 building table, A4 dialogue validator, A5 credits | **Done** |
+> | B1 washed-out colour | **Addressed speculatively** across 3 causes; unconfirmed |
+> | C1 water, C2 minimap, C3 quests, C4 world scoping, C5 wrapping, C7 NPC collision | **Done** |
+> | B2 merge to `main` | **Open — yours** |
+> | B3 Qwen/Unity port | **Deliberately not done** (network dependency, needs runtime) |
+> | B4 save format | **Deliberately not done** (architectural; now more urgent) |
+> | B5 what is this for? | **Open — yours** |
+> | C6 map asset | **Not possible here** (cannot author a `.umap` without an editor) |
+>
+> New item from the water fix: **C9**, below.
+>
+> The single most valuable thing now is a build result. Everything else is guesswork
+> until the project has been observed running.
 
 File references are to `Millhaven/Source/Millhaven/…` unless stated otherwise, on branch
 `claude/new-session-tl0t6r`.
@@ -192,17 +214,27 @@ if they ever become physical characters.
 I grepped. The codebase has none. Unfinished work is recorded in README §7 ("Known
 limitations") instead, which is a better habit than scattered markers — worth keeping.
 
+**C9. The world's landmarks sit in holes, not on features** — *new, found while
+verifying the water*
+Porting `TerrainHeight` to Python to check the shoreline turned up something unrelated:
+the cave mouth at (-5, -36) sits at **-3.2m**, and the dock at (-25, 26) at **-0.85m**.
+The cave is nominally in the "Northern Hills" but the hill term
+(`MillhavenWorldGen.cpp:115-119`) happens to be at a trough there, so the entrance is in
+a depression rather than in a hillside. It reads fine as a sinkhole and nothing is
+broken, so this is a design question rather than a bug: either move the landmarks onto
+features, or add a term that guarantees a rise where a cave mouth is placed. Cheap to
+check now that the maths runs standalone.
+
 ---
 
-## Suggested order
+## Suggested order (revised after the build pass)
 
-1. **B1** — unblocks all visual work, and may turn out to be the documented five-minute
-   material fix rather than a lighting hunt.
-2. **B2** — the project currently exists only on unmerged branches.
-3. **B5** — cheap to answer, and it re-ranks everything below it.
-4. **A1 + A2** — the safest real work available, and A1 builds the safety net that makes
-   later unattended work trustworthy.
-5. **C2, C1** — small, well-understood, visible improvements.
-6. **B3, B4, C3** — the architectural conversations, once the ground is stable.
-
-Awaiting your approval before starting anything.
+1. **Build it.** Everything else is speculation until the module compiles. If it
+   doesn't, `MillhavenTests.cpp` is the prime suspect and is safe to delete.
+2. **Play it, and confirm B1.** The Output Log line
+   `Millhaven: base material resolved to ...` answers in one glance what the console
+   tests were going to answer.
+3. **B2** — the project still exists only on unmerged branches.
+4. **B5** — cheap to answer, re-ranks everything below it.
+5. **B4** — quests are real state now, and they are lost on exit.
+6. **B3, C9** — the design conversations, once the ground is stable.

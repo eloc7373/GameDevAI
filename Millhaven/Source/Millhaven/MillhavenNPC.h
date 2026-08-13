@@ -6,6 +6,7 @@
 #include "MillhavenNPC.generated.h"
 
 class UProceduralMeshComponent;
+class UCapsuleComponent;
 class UMaterialInterface;
 class UMaterialInstanceDynamic;
 
@@ -14,8 +15,25 @@ struct FDlgOption
 {
 	FString Label;
 	FName Next;              // "x" closes the dialogue
-	FString QuestName;       // optional: updates quest tracker when chosen
+
+	// --- Quest effects, applied when this option is chosen ---
+
+	/** Non-empty starts (or retargets) a quest with this display name. */
+	FString QuestName;
 	FString QuestObjective;
+	/** Stable id for the quest above. Falls back to QuestName if left unset. */
+	FName QuestId;
+	/** Marks this quest id complete. */
+	FName CompletesQuest;
+
+	// --- Requirements. An option is only offered when all of these pass. ---
+
+	/** Only show while this quest is started and not yet complete. */
+	FName RequiresQuest;
+	/** Only show once this quest is complete. */
+	FName RequiresQuestComplete;
+	/** Hide once this quest exists at all - stops a quest being accepted twice. */
+	FName ForbidsQuest;
 };
 
 struct FDlgNode
@@ -41,6 +59,21 @@ public:
 	void AddOption(FName NodeKey, const FString& Label, FName Next,
 	               const FString& QuestName = TEXT(""), const FString& QuestObjective = TEXT(""));
 
+	/**
+	 * Full form, for options that carry requirements or complete a quest.
+	 * Takes a prepared struct rather than returning a reference into the node's
+	 * option array - a reference there would dangle as soon as the next
+	 * AddOption grew it, which is the same trap UInputMappingContext::MapKey
+	 * sets.
+	 */
+	void AddOption(FName NodeKey, const FDlgOption& Option);
+
+	/**
+	 * Logs dangling option targets, a missing "start" node, and unreachable
+	 * nodes. Called once per NPC after its tree is built.
+	 */
+	void ValidateDialogue() const;
+
 	const FDlgNode* GetNode(FName Key) const { return Dialogue.Find(Key); }
 	void FacePoint(const FVector& WorldPoint);
 
@@ -60,6 +93,8 @@ protected:
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
 	UPROPERTY() USceneComponent* Root = nullptr;
+	/** Blocks the player so villagers are solid rather than walk-through. */
+	UPROPERTY() UCapsuleComponent* Collision = nullptr;
 	UPROPERTY() UProceduralMeshComponent* LegsMesh = nullptr;
 	UPROPERTY() UProceduralMeshComponent* BodyMesh = nullptr;
 	UPROPERTY() UProceduralMeshComponent* HeadMesh = nullptr;

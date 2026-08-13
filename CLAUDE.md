@@ -45,13 +45,19 @@ Note the nesting: the git root is `GameDevAI/`, the UE project root is
 ### Current state (2026-08-13)
 
 - `main` contains **only** `TestFile`. The entire project lives on unmerged branches.
-  Millhaven is on `claude/new-session-tl0t6r`. Nothing has been merged, ever.
-- **Compiles clean on UE 5.8** (per README + a prior session): `MillhavenEditor Win64
-  Development`, MSVC 14.44, UHT + compile + link all succeed.
-- **Runtime is not verified.** Compiling is not running. The world geometry, materials,
-  input and dialogue have never been confirmed working in a live session.
-- **Live open blocker:** terrain colour renders washed out in PIE. Diagnosis was
-  interrupted waiting on console tests — see `journal/backlog.md` B1.
+  Millhaven began on `claude/new-session-tl0t6r`; current work is on
+  `claude/new-session-v8ylmq`, branched from it. Nothing has been merged, ever.
+- **The 5.8 hardening commits compiled clean** (per README + a prior session):
+  `MillhavenEditor Win64 Development`, MSVC 14.44, UHT + compile + link all succeed.
+- **The quest/water/colour pass on top has NOT been compiled.** It was written without
+  an engine available. `check_sources.py` passes and the terrain maths was verified by
+  porting it to Python, but neither is a compiler. Treat the current tip as
+  "expected to build", not "known to build".
+- **Runtime has never been verified**, before or after. Nothing in this project has
+  been observed running.
+- **Terrain colour was reported washed out in PIE.** Addressed speculatively across
+  three candidate causes at once (material resolution, sun/sky ratio, fog start
+  distance) because the diagnostic console tests were never run. Unconfirmed.
 
 ## 2. Module & dependencies
 
@@ -95,9 +101,24 @@ python3 Millhaven/Tools/check_sources.py      # exit 0 = pass
 
 Static checks needing no engine: engine type-name collisions, `.generated.h` include
 ordering, declaration/definition cross-checks, brace balance, unresolvable local
-includes, missing `GENERATED_BODY()`. **Verified passing 2026-08-13**: 13 files, 0
-errors, 0 warnings. Run it before every commit — but treat it as a weak signal. It did
-not and cannot catch the C4458 that a real compiler caught.
+includes, missing `GENERATED_BODY()`, engine-member shadowing, static UObject pointers,
+UObject members missing `UPROPERTY()`, `CreateDefaultSubobject` on a `UDataAsset`, and
+LWC double→float narrowing. **Verified passing 2026-08-13**: 14 files, 0 errors, 0
+warnings.
+
+Run it before every commit — but treat it as a weak signal. It did not and cannot catch
+the C4458 that a real compiler caught. The **declaration/definition cross-check is the
+most valuable part** when editing blind: it catches a signature changed in the `.h` but
+not the `.cpp`, which is the single easiest mistake to make without a build.
+
+**When adding a check, prove it fires.** Drop a deliberately broken `ZZTemp.h/.cpp` into
+`Source/Millhaven/`, confirm the error appears with the right line number, then delete
+it. A rule that silently never matches is worse than no rule, because it is trusted.
+
+The pure maths can also be verified without an engine by porting it to Python and
+checking the numbers — that is how the waterline change was validated (village disc
+flat to 0.0000cm, 469 water tiles emitted, no tile inside the village disc, boardwalk
+landing 31cm below deck height). Worth repeating for any change to `TerrainHeight`.
 
 ## 4. Coding conventions (observed in the existing C++)
 
@@ -125,7 +146,7 @@ not and cannot catch the C4458 that a real compiler caught.
 
 ### Architecture in one paragraph each
 
-**World generation** (`MillhavenWorldGen.cpp`, 715 lines). An `AActor` spawned by the
+**World generation** (`MillhavenWorldGen.cpp`). An `AActor` spawned by the
 GameMode in `InitGame`, which builds everything in `BeginPlay`. `TerrainHeight(WX, WY)`
 is a **pure static function** — a sum of sines with a flat village disc (radius 16m), a
 northern hill ramp, a south-west coastal basin and a rising outer rim. Because it's
@@ -139,14 +160,28 @@ cooked synchronously), `DecorMesh` (foliage, no collision), `WaterMesh` and `Clo
 location banner.
 
 **NPCs** (`MillhavenNPC.cpp`). Each NPC is an actor with three procedural mesh
-components (legs static, body and head bob out of phase). Dialogue is a
-`TMap<FName, FDlgNode>` built imperatively at spawn time via `AddNode` / `AddOption`
-calls in `WorldGen::SpawnNPCs()` — the four NPCs' entire trees are literals there.
+components (legs static, body and head bob out of phase) plus a `UCapsuleComponent` on
+the `Pawn` profile so villagers are solid. Dialogue is a `TMap<FName, FDlgNode>` built
+imperatively at spawn time via `AddNode` / `AddOption` calls in
+`WorldGen::SpawnNPCs()` — the four NPCs' entire trees are literals there.
 `FDlgOption::Next` is a node key; the magic value `"x"` closes the conversation. Options
-optionally carry a quest name + objective that overwrite the player's tracker. A
+carry optional quest effects (start / retarget / complete, by `FName` id) and optional
+requirements (`RequiresQuest`, `RequiresQuestComplete`, `ForbidsQuest`). A
 `static TArray<TWeakObjectPtr<AMillhavenNPC>> All` registry lets the player and HUD find
-NPCs without iteration-order dependencies. **There is no behaviour tree, no AI
+NPCs without iteration-order dependencies; **every read of it must filter by
+`GetWorld()`**, since it is process-global and spans PIE instances.
+`ValidateDialogue()` runs once per NPC at spawn and logs dangling targets, unreachable
+nodes, and nodes whose every option is gated. **There is no behaviour tree, no AI
 controller, no navmesh, and no movement** — NPCs are stationary conversation nodes.
+
+**Quests** (`MillhavenCharacter.cpp`). `TArray<FMillhavenQuest>` on the pawn — id, display
+name, objective, complete flag. Quests are keyed by a stable `FName` so two NPCs can
+advance the same one. `GetAvailableOptions()` filters the current node's options against
+quest state **once**, and both the HUD and `SelectOption()` index into that same list —
+never iterate `Node->Options` directly for display or selection, or the numbers on
+screen will stop matching the keys. Exploration quests complete by proximity in
+`UpdateLocationQuests()`, against landmark accessors on the world generator. Quest state
+is **not persisted** — see §7.
 
 **HUD** (`MillhavenHUD.cpp`). Immediate-mode `AHUD::DrawHUD` with Canvas primitives —
 **no UMG, no widget assets**. Draws a quest panel, minimap, location banner, control
@@ -187,6 +222,16 @@ is the most likely way to break this project.
 - **PRNG seeds must not collapse.** `Prng(i * j)` degenerates whenever either is 0. Mix
   with distinct primes.
 - Include explicitly. IWYU is on; nothing arrives transitively.
+- **One definition per fact.** Duplicated tables have drifted apart twice here: the
+  minimap's building list against `BuildStructures()`, and the beach colour against the
+  water plane. Anything two systems must agree on gets a single accessor —
+  `VillageBuildings()`, `CaveMouthM()`, `DockM()`, `WaterlineCm`, `IsWaterAt()`. Add to
+  that list rather than copying a constant.
+- **Never hold a reference into a container you are about to add to.** It bit
+  `UInputMappingContext::MapKey`, and it is why `AddOption` takes a prepared
+  `FDlgOption` instead of returning a reference to fill in.
+- `EAutomationTestFlags` became an enum class in UE 5.5, so `int32 Flags = A | B;` no
+  longer compiles. Pass the flag expression straight to the test macro.
 
 ## 6. Asset conventions
 
@@ -212,10 +257,11 @@ Inferred from the project's state; confirm before working in any of these.
   `Millhaven.uproject`, `Config/*.ini`. Changing `BuildSettingsVersion`,
   `EngineIncludeOrderVersion`, the module dependency list or the plugin list can break a
   build the owner cannot easily re-verify. Flag and stop.
-- **Save-game format** — none exists yet. That makes *introducing* one an architectural
-  decision, not a chore: the quest tracker is currently two `FString`s on the pawn, and
-  the first serialisation choice will be hard to undo. Do not add `USaveGame` on your
-  own initiative.
+- **Save-game format** — none exists yet, and quest progress is lost on exit. Now that
+  quests are a real `TArray<FMillhavenQuest>`, persisting them is an obvious next step
+  and an architectural decision: the world is deterministic from `TerrainHeight`, so a
+  save can be tiny (player transform + quest state) — but only while nothing mutates
+  the world. Do not add `USaveGame` on your own initiative.
 - **The §5 hazard list** — those fixes look like arbitrary style choices. They are not.
 - **`CREDITS.md` licence claims** — never upgrade an entry from unverified to verified
   without the owner having looked at the actual model page.

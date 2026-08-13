@@ -1,7 +1,9 @@
 #include "MillhavenNPC.h"
+#include "MillhavenWorldGen.h"
 #include "ProcMeshLib.h"
 #include "ProceduralMeshComponent.h"
 #include "Components/SceneComponent.h"
+#include "Components/CapsuleComponent.h"
 #include "Engine/World.h"
 #include "Materials/MaterialInterface.h"
 #include "Materials/Material.h"
@@ -44,6 +46,15 @@ AMillhavenNPC::AMillhavenNPC()
 	Root = CreateDefaultSubobject<USceneComponent>(TEXT("Root"));
 	SetRootComponent(Root);
 
+	// The art is authored with the NPC's feet at the actor origin, so the
+	// capsule is pushed up by its own half-height to stand on the ground
+	// rather than being buried to the waist.
+	Collision = CreateDefaultSubobject<UCapsuleComponent>(TEXT("Collision"));
+	Collision->SetupAttachment(Root);
+	Collision->InitCapsuleSize(42.f, 90.f);
+	Collision->SetRelativeLocation(FVector(0.0, 0.0, 90.0));
+	Collision->SetCollisionProfileName(TEXT("Pawn"));
+
 	LegsMesh = CreateDefaultSubobject<UProceduralMeshComponent>(TEXT("Legs"));
 	LegsMesh->SetupAttachment(Root);
 	LegsMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
@@ -80,12 +91,9 @@ void AMillhavenNPC::Init(const FString& InName, const FString& InRole,
 
 	if (!BaseMaterial)
 	{
-		BaseMaterial = LoadObject<UMaterialInterface>(nullptr,
-			TEXT("/Engine/BasicShapes/BasicShapeMaterial.BasicShapeMaterial"));
-	}
-	if (!BaseMaterial)
-	{
-		BaseMaterial = UMaterial::GetDefaultMaterial(MD_Surface);
+		// One shared resolution policy for the whole project - see
+		// AMillhavenWorldGen::ResolveBaseMaterial.
+		BaseMaterial = AMillhavenWorldGen::ResolveBaseMaterial();
 	}
 
 	const FColor LegColor(
@@ -138,14 +146,19 @@ void AMillhavenNPC::AddNode(FName Key, const FString& Text)
 void AMillhavenNPC::AddOption(FName NodeKey, const FString& Label, FName Next,
                               const FString& QuestName, const FString& QuestObjective)
 {
+	FDlgOption Opt;
+	Opt.Label = Label;
+	Opt.Next = Next;
+	Opt.QuestName = QuestName;
+	Opt.QuestObjective = QuestObjective;
+	AddOption(NodeKey, Opt);
+}
+
+void AMillhavenNPC::AddOption(FName NodeKey, const FDlgOption& Option)
+{
 	if (FDlgNode* Node = Dialogue.Find(NodeKey))
 	{
-		FDlgOption Opt;
-		Opt.Label = Label;
-		Opt.Next = Next;
-		Opt.QuestName = QuestName;
-		Opt.QuestObjective = QuestObjective;
-		Node->Options.Add(Opt);
+		Node->Options.Add(Option);
 	}
 	else
 	{
@@ -153,6 +166,107 @@ void AMillhavenNPC::AddOption(FName NodeKey, const FString& Label, FName Next,
 			TEXT("Millhaven: AddOption on unknown dialogue node '%s' (NPC '%s') - option dropped."),
 			*NodeKey.ToString(), *NpcName);
 	}
+}
+
+void AMillhavenNPC::ValidateDialogue() const
+{
+#if !UE_BUILD_SHIPPING
+	static const FName StartKey("start");
+	static const FName CloseKey("x");
+
+	if (!Dialogue.Contains(StartKey))
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("Millhaven: NPC '%s' has no 'start' node - it cannot be talked to."), *NpcName);
+		return;
+	}
+
+	// Dangling targets: an option pointing at a node that was never added
+	// used to just dead-end the conversation with no diagnostic.
+	for (const TPair<FName, FDlgNode>& Pair : Dialogue)
+	{
+		for (const FDlgOption& Opt : Pair.Value.Options)
+		{
+			if (Opt.Next == CloseKey || Opt.Next.IsNone())
+			{
+				continue;
+			}
+			if (!Dialogue.Contains(Opt.Next))
+			{
+				UE_LOG(LogTemp, Warning,
+					TEXT("Millhaven: NPC '%s' node '%s' option '%s' targets unknown node '%s'."),
+					*NpcName, *Pair.Key.ToString(), *Opt.Label, *Opt.Next.ToString());
+			}
+		}
+	}
+
+	// A node whose every option is requirement-gated can strand the player
+	// with nothing to press but Escape, and only in the quest state that
+	// happens to hide them all - so it is easy to miss by hand.
+	for (const TPair<FName, FDlgNode>& Pair : Dialogue)
+	{
+		if (Pair.Value.Options.Num() == 0)
+		{
+			UE_LOG(LogTemp, Warning,
+				TEXT("Millhaven: NPC '%s' node '%s' has no options - it is a dead end."),
+				*NpcName, *Pair.Key.ToString());
+			continue;
+		}
+
+		bool bHasUngated = false;
+		for (const FDlgOption& Opt : Pair.Value.Options)
+		{
+			if (Opt.RequiresQuest.IsNone()
+				&& Opt.RequiresQuestComplete.IsNone()
+				&& Opt.ForbidsQuest.IsNone())
+			{
+				bHasUngated = true;
+				break;
+			}
+		}
+		if (!bHasUngated)
+		{
+			UE_LOG(LogTemp, Warning,
+				TEXT("Millhaven: NPC '%s' node '%s' has only gated options - the player ")
+				TEXT("can reach a state where nothing is offered."),
+				*NpcName, *Pair.Key.ToString());
+		}
+	}
+
+	// Unreachable nodes: authored but impossible to arrive at.
+	TSet<FName> Reachable;
+	TArray<FName> Pending;
+	Reachable.Add(StartKey);
+	Pending.Add(StartKey);
+	while (Pending.Num() > 0)
+	{
+		const FName Key = Pending.Pop();
+		if (const FDlgNode* Node = Dialogue.Find(Key))
+		{
+			for (const FDlgOption& Opt : Node->Options)
+			{
+				if (Opt.Next == CloseKey || Opt.Next.IsNone())
+				{
+					continue;
+				}
+				if (Dialogue.Contains(Opt.Next) && !Reachable.Contains(Opt.Next))
+				{
+					Reachable.Add(Opt.Next);
+					Pending.Add(Opt.Next);
+				}
+			}
+		}
+	}
+	for (const TPair<FName, FDlgNode>& Pair : Dialogue)
+	{
+		if (!Reachable.Contains(Pair.Key))
+		{
+			UE_LOG(LogTemp, Warning,
+				TEXT("Millhaven: NPC '%s' node '%s' is unreachable from 'start'."),
+				*NpcName, *Pair.Key.ToString());
+		}
+	}
+#endif
 }
 
 void AMillhavenNPC::FacePoint(const FVector& WorldPoint)
