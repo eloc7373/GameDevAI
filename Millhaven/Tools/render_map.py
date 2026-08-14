@@ -29,8 +29,9 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from verify_worldgen import (  # noqa: E402
-    BAY_WATCH_M, CAVE_MOUTH_M, DOCK_M, NPCS, VILLAGE_BUILDINGS,
-    VILLAGE_RADIUS_M, WATERLINE_CM, ground, is_water_at,
+    BAY_WATCH_M, CAVE_MAX_AX, CAVE_MAX_AY, CAVE_MIN_AX, CAVE_MIN_AY,
+    CAVE_MOUTH_M, DOCK_M, NPCS, VILLAGE_BUILDINGS, VILLAGE_RADIUS_M,
+    WATERLINE_CM, ground, is_water_at, parse_gatherables,
 )
 
 WORLD_M = 180.0          # matches sizeM in BuildTerrain()
@@ -180,6 +181,27 @@ def render() -> str:
     out.append(f'<line x1="{px0:.1f}" y1="{py0:.1f}" x2="{px1:.1f}" y2="{py1:.1f}" '
                f'stroke="#a0784a" stroke-width="10" stroke-linecap="round"/>')
 
+    # --- the cave chamber ---------------------------------------------------
+    cxa, cya = to_screen(CAVE_MIN_AX, CAVE_MIN_AY, size_px)
+    cxb, cyb = to_screen(CAVE_MAX_AX, CAVE_MAX_AY, size_px)
+    out.append(f'<rect x="{min(cxa,cxb):.1f}" y="{min(cya,cyb):.1f}" '
+               f'width="{abs(cxb-cxa):.1f}" height="{abs(cyb-cya):.1f}" '
+               f'fill="#2b2438" fill-opacity="0.72" stroke="{INK}" stroke-width="2"/>')
+
+    # --- gatherables ---------------------------------------------------------
+    ITEM_STYLE = {
+        "GoldenWheat":     ("#e6ba44", "Wheat"),
+        "Silverleaf":      ("#c4e2d6", "Silverleaf"),
+        "ShellwaterPearl": ("#f0ecf6", "Pearls"),
+    }
+    seen_items = set()
+    for ax, ay, item in parse_gatherables():
+        colour, _ = ITEM_STYLE.get(item, ("#ffffff", item))
+        x, y = to_screen(ax, ay, size_px)
+        out.append(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="3.6" fill="{colour}" '
+                   f'stroke="{INK}" stroke-width="1"/>')
+        seen_items.add(item)
+
     # --- landmarks and NPCs ------------------------------------------------
     marker(*CAVE_MOUTH_M, label="Cave Mouth", colour="#2b2438")
     marker(*BAY_WATCH_M, label="Moored Boat", colour="#c07840")
@@ -217,6 +239,18 @@ def render() -> str:
                f'font-size="12" fill="{INK}" opacity="0.7">'
                f'Generated from TerrainHeight() - '
                f'{water_cells} water cells, waterline {WATERLINE_CM:.0f} cm</text>')
+
+    # legend for the gatherables
+    lx, ly = size_px - 210, 40
+    out.append(f'<rect x="{lx-14}" y="{ly-24}" width="196" height="{26*len(ITEM_STYLE)+22}" '
+               f'rx="4" fill="{PAPER}" fill-opacity="0.86" stroke="{INK}" stroke-width="1"/>')
+    for k, (colour, label) in ITEM_STYLE.items():
+        out.append(f'<circle cx="{lx}" cy="{ly-4}" r="5" fill="{colour}" '
+                   f'stroke="{INK}" stroke-width="1"/>')
+        n = sum(1 for _a, _b, it in parse_gatherables() if it == k)
+        out.append(f'<text x="{lx+14}" y="{ly}" font-family="Georgia,serif" '
+                   f'font-size="14" fill="{INK}">{label} x{n}</text>')
+        ly += 26
 
     out.append('</svg>')
     return "\n".join(out)

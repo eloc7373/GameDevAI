@@ -10,6 +10,7 @@ class UDirectionalLightComponent;
 class USkyLightComponent;
 class USkyAtmosphereComponent;
 class UExponentialHeightFogComponent;
+class UPointLightComponent;
 class UMaterialInterface;
 class UMaterialInstanceDynamic;
 
@@ -95,6 +96,37 @@ public:
 	/** The moored boat out in the bay - where "Trouble in the Bay" sends you. */
 	static FVector2D BayWatchM() { return FVector2D(-20.0, 30.0); }
 
+	// --- The cave chamber, in design metres --------------------------------
+	// Walls and a roof over the natural terrain, not a flat room: the ground
+	// here falls about 3m across the footprint, which makes a descending cave
+	// for free and would fight any floor slab.
+	static constexpr float CaveMinAX = -17.0f;
+	static constexpr float CaveMaxAX =  -4.5f;
+	static constexpr float CaveMinAY = -45.5f;
+	static constexpr float CaveMaxAY = -34.5f;
+	/** The doorway gap in the east wall, lining up with the carved mouth. */
+	static constexpr float CaveDoorMinAY = -37.5f;
+	static constexpr float CaveDoorMaxAY = -34.5f;
+	/** Underside of the roof slab, UE cm. Clears the highest floor by ~3m. */
+	static constexpr float CaveRoofCm = 40.f;
+
+	// --- Time of day --------------------------------------------------------
+
+	/** Real seconds for one in-game day. */
+	static constexpr float DayLengthSeconds = 720.f;
+
+	/** Current hour, 0..24. */
+	float GetTimeOfDay() const { return TimeOfDay; }
+
+	/** True while the sun is down - drives the cave glow and the night palette. */
+	bool IsNight() const { return TimeOfDay < 6.f || TimeOfDay >= 19.f; }
+
+	/** "07:20" for the HUD clock. */
+	static FString ClockString(float Hours);
+
+	/** "Dawn", "Morning", ... for the HUD. */
+	static FString PhaseName(float Hours);
+
 	/** The village houses. Single source of truth; see FMillhavenBuildingDef. */
 	static const TArray<FMillhavenBuildingDef>& VillageBuildings();
 
@@ -133,6 +165,9 @@ protected:
 	UPROPERTY() USkyLightComponent* Sky = nullptr;
 	UPROPERTY() USkyAtmosphereComponent* Atmosphere = nullptr;
 	UPROPERTY() UExponentialHeightFogComponent* Fog = nullptr;
+	/** Lit only after dark, so Captain Wren's "the cave mouth glows at
+	 *  midnight" is literally true rather than just flavour text. */
+	UPROPERTY() UPointLightComponent* CaveGlow = nullptr;
 
 	/** Cached so the engine material is not re-resolved (and stays GC-rooted). */
 	UPROPERTY() UMaterialInterface* BaseMaterial = nullptr;
@@ -155,7 +190,12 @@ protected:
 	void BuildScenery();
 	void BuildWater();
 	void BuildClouds();
+	void BuildCaveChamber();
 	void SpawnNPCs();
+	void SpawnPickups();
+
+	/** Advances the clock and re-tints sun, sky and fog to match. */
+	void UpdateDayNight(float DeltaTime);
 
 	// Helpers
 	void AddTree(float AX, float AY, float Scale);
@@ -165,5 +205,7 @@ protected:
 	void AddStall(float AX, float AY);
 
 	float TimeAccum = 0.f;
+	/** Starts mid-morning so the first thing a player sees is daylight. */
+	float TimeOfDay = 8.f;
 	bool bWorldBuilt = false;
 };

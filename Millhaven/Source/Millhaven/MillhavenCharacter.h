@@ -26,6 +26,15 @@ struct FMillhavenQuest
 	FString Name;
 	FString Objective;
 	bool bComplete = false;
+
+	/**
+	 * Optional gathering goal. When set, the quest tracks inventory and shows
+	 * progress; a quest with bAutoCompleteOnItems also finishes by itself once
+	 * the count is met, rather than waiting to be handed in.
+	 */
+	FName RequiredItem;
+	int32 RequiredCount = 0;
+	bool bAutoCompleteOnItems = false;
 };
 
 /**
@@ -66,6 +75,23 @@ public:
 	void StartOrUpdateQuest(FName Id, const FString& Name, const FString& Objective);
 	void CompleteQuest(FName Id);
 
+	/** Attaches a gathering goal to a quest that is already running. */
+	void SetQuestItemGoal(FName Id, FName Item, int32 Count, bool bAutoComplete);
+
+	// --- Inventory ---
+
+	const TMap<FName, int32>& GetInventory() const { return Inventory; }
+	int32 GetItemCount(FName Item) const;
+	void AddItem(FName Item, const FString& DisplayName, int32 Count = 1);
+	/** Removes Count of Item. Returns false and changes nothing if short. */
+	bool ConsumeItem(FName Item, int32 Count);
+	/** Display name for an item the player has seen, else the raw id. */
+	FString ItemDisplayName(FName Item) const;
+
+	/** Transient "+1 Golden Wheat" line for the HUD; empty when nothing recent. */
+	FString PickupToast;
+	float PickupToastTimer = 0.f;
+
 	/** True when an option's requirements pass and it should be offered. */
 	bool IsOptionAvailable(const FDlgOption& Opt) const;
 
@@ -101,6 +127,7 @@ protected:
 	UPROPERTY() UInputAction* Dialogue3Action = nullptr;
 	UPROPERTY() UInputAction* Dialogue4Action = nullptr;
 	UPROPERTY() UInputAction* JumpAction = nullptr;
+	UPROPERTY() UInputAction* SprintAction = nullptr;
 
 	/** Creates the Input Actions + mapping context. Safe to call more than once. */
 	void BuildInputAssets();
@@ -115,6 +142,12 @@ protected:
 
 	/** Completes any active quest whose landmark the player has reached. */
 	void UpdateLocationQuests();
+
+	/** Sweeps up nearby pickups and files them into the inventory. */
+	void SweepPickups();
+
+	/** Finishes any auto-complete gathering quest whose count is now met. */
+	void UpdateItemQuests();
 
 	FMillhavenQuest* FindQuest(FName Id);
 	const FMillhavenQuest* FindQuest(FName Id) const;
@@ -132,7 +165,12 @@ protected:
 	void OnOption4();
 	void OnJumpStart();
 	void OnJumpStop();
+	void OnSprintStart();
+	void OnSprintStop();
 	void SelectOption(int32 Index);
+
+	static constexpr float WalkSpeed = 560.f;
+	static constexpr float SprintSpeed = 900.f;
 
 	// Dialogue
 	UPROPERTY() AMillhavenNPC* ActiveNPC = nullptr;
@@ -140,6 +178,10 @@ protected:
 
 	/** Plain data, not a UObject - no reflection or GC involvement needed. */
 	TArray<FMillhavenQuest> Quests;
+
+	TMap<FName, int32> Inventory;
+	/** Pretty names, learned from the pickups themselves as they are collected. */
+	TMap<FName, FString> ItemNames;
 
 	float WalkPhase = 0.f;
 };

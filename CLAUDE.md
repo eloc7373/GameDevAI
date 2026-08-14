@@ -203,9 +203,27 @@ NPCs without iteration-order dependencies; **every read of it must filter by
 nodes, and nodes whose every option is gated. **There is no behaviour tree, no AI
 controller, no navmesh, and no movement** — NPCs are stationary conversation nodes.
 
+**Pickups** (`MillhavenPickup.cpp`). `AMillhavenPickup` is a spinning, bobbing
+procedural item collected by proximity in `AMillhavenCharacter::SweepPickups()` — no
+interact key. Positions come from an **explicit table** in `MillhavenWorldGen.cpp`
+(`GatherableTable()`), deliberately not a PRNG scatter, so `verify_worldgen.py` can
+assert every one against the terrain. It keeps the same `TWeakObjectPtr` registry
+pattern as the NPCs, with the same rule: **filter every read by `GetWorld()`**.
+
+**Time of day** (`MillhavenWorldGen::UpdateDayNight`). `TimeOfDay` is hours 0–24, a full
+day is `DayLengthSeconds`. Sun elevation produces a single `Daylight` blend in 0–1, and
+sun colour/intensity, sky-light intensity, fog colour, fog density and the cave glow all
+derive from it. **Add new time-varying visuals to that one function** rather than
+sampling the clock elsewhere — the initial state is set by calling it with `0.f` from
+`BuildEnvironmentLighting`, so there is no duplicated "daytime defaults" block.
+
 **Quests** (`MillhavenCharacter.cpp`). `TArray<FMillhavenQuest>` on the pawn — id, display
-name, objective, complete flag. Quests are keyed by a stable `FName` so two NPCs can
-advance the same one. `GetAvailableOptions()` filters the current node's options against
+name, objective, complete flag, and an optional gathering goal (`RequiredItem`,
+`RequiredCount`, `bAutoCompleteOnItems`). Quests are keyed by a stable `FName` so two
+NPCs can advance the same one. Dialogue options can require items (`RequiresItem`),
+consume them (`ConsumesItem`) and attach a goal to the quest they start (`QuestItem`).
+**`SelectOption()` takes payment before applying any other effect** — a quest that
+completes while the goods stay in the bag is worse than an option that silently fails. `GetAvailableOptions()` filters the current node's options against
 quest state **once**, and both the HUD and `SelectOption()` index into that same list —
 never iterate `Node->Options` directly for display or selection, or the numbers on
 screen will stop matching the keys. Exploration quests complete by proximity in

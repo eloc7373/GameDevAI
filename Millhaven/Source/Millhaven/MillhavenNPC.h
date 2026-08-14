@@ -26,6 +26,16 @@ struct FDlgOption
 	/** Marks this quest id complete. */
 	FName CompletesQuest;
 
+	/** Gathering goal attached to the quest this option starts. */
+	FName QuestItem;
+	int32 QuestItemCount = 0;
+	/** Whether that goal finishes the quest by itself, or needs handing in. */
+	bool bQuestItemAutoCompletes = false;
+
+	/** Items taken from the player when this option is chosen. */
+	FName ConsumesItem;
+	int32 ConsumesItemCount = 0;
+
 	// --- Requirements. An option is only offered when all of these pass. ---
 
 	/** Only show while this quest is started and not yet complete. */
@@ -34,6 +44,9 @@ struct FDlgOption
 	FName RequiresQuestComplete;
 	/** Hide once this quest exists at all - stops a quest being accepted twice. */
 	FName ForbidsQuest;
+	/** Only show while the player is carrying at least this many of an item. */
+	FName RequiresItem;
+	int32 RequiresItemCount = 1;
 };
 
 struct FDlgNode

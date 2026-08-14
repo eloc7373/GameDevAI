@@ -1,5 +1,6 @@
 #include "MillhavenCharacter.h"
 #include "MillhavenNPC.h"
+#include "MillhavenPickup.h"
 #include "MillhavenWorldGen.h"
 #include "ProcMeshLib.h"
 
@@ -65,7 +66,7 @@ AMillhavenCharacter::AMillhavenCharacter()
 	{
 		Move->bOrientRotationToMovement = true;
 		Move->RotationRate = FRotator(0.f, 640.f, 0.f);
-		Move->MaxWalkSpeed = 560.f;
+		Move->MaxWalkSpeed = WalkSpeed;
 		Move->JumpZVelocity = 420.f;
 		Move->AirControl = 0.2f;
 	}
@@ -120,6 +121,7 @@ void AMillhavenCharacter::BuildInputAssets()
 	Dialogue3Action   = MakeAction(TEXT("IA_Dialogue3"),   EInputActionValueType::Boolean);
 	Dialogue4Action   = MakeAction(TEXT("IA_Dialogue4"),   EInputActionValueType::Boolean);
 	JumpAction        = MakeAction(TEXT("IA_Jump"),        EInputActionValueType::Boolean);
+	SprintAction      = MakeAction(TEXT("IA_Sprint"),      EInputActionValueType::Boolean);
 
 	InputMapping = NewObject<UInputMappingContext>(this, TEXT("IMC_Millhaven"));
 
@@ -157,6 +159,7 @@ void AMillhavenCharacter::BuildInputAssets()
 	Map(Dialogue3Action, EKeys::Three,    false);
 	Map(Dialogue4Action, EKeys::Four,     false);
 	Map(JumpAction,      EKeys::SpaceBar, false);
+	Map(SprintAction,    EKeys::LeftShift, false);
 }
 
 void AMillhavenCharacter::RegisterInputMapping()
@@ -264,6 +267,9 @@ void AMillhavenCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInput
 
 		EIC->BindAction(JumpAction, ETriggerEvent::Started,   this, &AMillhavenCharacter::OnJumpStart);
 		EIC->BindAction(JumpAction, ETriggerEvent::Completed, this, &AMillhavenCharacter::OnJumpStop);
+
+		EIC->BindAction(SprintAction, ETriggerEvent::Started,   this, &AMillhavenCharacter::OnSprintStart);
+		EIC->BindAction(SprintAction, ETriggerEvent::Completed, this, &AMillhavenCharacter::OnSprintStop);
 	}
 	else
 	{
@@ -310,6 +316,113 @@ void AMillhavenCharacter::LookUp(const FInputActionValue& Value)
 
 void AMillhavenCharacter::OnJumpStart() { if (!IsInDialogue()) Jump(); }
 void AMillhavenCharacter::OnJumpStop()  { StopJumping(); }
+
+void AMillhavenCharacter::OnSprintStart()
+{
+	if (UCharacterMovementComponent* Move = GetCharacterMovement())
+	{
+		Move->MaxWalkSpeed = SprintSpeed;
+	}
+}
+
+void AMillhavenCharacter::OnSprintStop()
+{
+	if (UCharacterMovementComponent* Move = GetCharacterMovement())
+	{
+		Move->MaxWalkSpeed = WalkSpeed;
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Inventory
+// ---------------------------------------------------------------------------
+int32 AMillhavenCharacter::GetItemCount(FName Item) const
+{
+	const int32* Found = Inventory.Find(Item);
+	return Found ? *Found : 0;
+}
+
+FString AMillhavenCharacter::ItemDisplayName(FName Item) const
+{
+	if (const FString* Found = ItemNames.Find(Item))
+	{
+		return *Found;
+	}
+	return Item.ToString();
+}
+
+void AMillhavenCharacter::AddItem(FName Item, const FString& DisplayName, int32 Count)
+{
+	if (Item.IsNone() || Count <= 0)
+	{
+		return;
+	}
+	Inventory.FindOrAdd(Item) += Count;
+	if (!DisplayName.IsEmpty())
+	{
+		ItemNames.Add(Item, DisplayName);
+	}
+
+	PickupToast = FString::Printf(TEXT("+%d  %s  (%d)"),
+		Count, *ItemDisplayName(Item), GetItemCount(Item));
+	PickupToastTimer = 2.2f;
+}
+
+bool AMillhavenCharacter::ConsumeItem(FName Item, int32 Count)
+{
+	if (Item.IsNone() || Count <= 0)
+	{
+		return true;
+	}
+	int32* Have = Inventory.Find(Item);
+	if (!Have || *Have < Count)
+	{
+		return false;   // short: change nothing
+	}
+	*Have -= Count;
+	if (*Have <= 0)
+	{
+		Inventory.Remove(Item);
+	}
+	return true;
+}
+
+void AMillhavenCharacter::SweepPickups()
+{
+	const FVector Here = GetActorLocation();
+	for (const TWeakObjectPtr<AMillhavenPickup>& Weak : AMillhavenPickup::All)
+	{
+		AMillhavenPickup* P = Weak.Get();
+		// Process-global registry - see the note on AMillhavenPickup::All.
+		if (!P || P->IsCollected() || P->GetWorld() != GetWorld())
+		{
+			continue;
+		}
+		if ((float)FVector::Dist2D(P->GetActorLocation(), Here) > AMillhavenPickup::PickupRangeCm)
+		{
+			continue;
+		}
+		if (P->Collect())
+		{
+			AddItem(P->ItemId, P->DisplayName, 1);
+		}
+	}
+}
+
+void AMillhavenCharacter::UpdateItemQuests()
+{
+	for (FMillhavenQuest& Q : Quests)
+	{
+		if (Q.bComplete || !Q.bAutoCompleteOnItems || Q.RequiredItem.IsNone())
+		{
+			continue;
+		}
+		if (GetItemCount(Q.RequiredItem) >= Q.RequiredCount)
+		{
+			CompleteQuest(Q.Id);
+		}
+	}
+}
 
 AMillhavenNPC* AMillhavenCharacter::GetNearbyNPC() const
 {
@@ -428,8 +541,27 @@ void AMillhavenCharacter::CompleteQuest(FName Id)
 	UE_LOG(LogTemp, Log, TEXT("Millhaven: quest complete - %s"), *Q->Name);
 }
 
+void AMillhavenCharacter::SetQuestItemGoal(FName Id, FName Item, int32 Count, bool bAutoComplete)
+{
+	if (Item.IsNone() || Count <= 0)
+	{
+		return;
+	}
+	if (FMillhavenQuest* Q = FindQuest(Id))
+	{
+		Q->RequiredItem = Item;
+		Q->RequiredCount = Count;
+		Q->bAutoCompleteOnItems = bAutoComplete;
+	}
+}
+
 bool AMillhavenCharacter::IsOptionAvailable(const FDlgOption& Opt) const
 {
+	if (!Opt.RequiresItem.IsNone()
+		&& GetItemCount(Opt.RequiresItem) < Opt.RequiresItemCount)
+	{
+		return false;
+	}
 	if (!Opt.RequiresQuest.IsNone() && !IsQuestActive(Opt.RequiresQuest))
 	{
 		return false;
@@ -483,12 +615,28 @@ void AMillhavenCharacter::SelectOption(int32 Index)
 	// which invalidates the node these pointers point into.
 	const FDlgOption Opt = *Available[Index];
 
+	// Take payment first: if the player is somehow short, nothing else happens.
+	// The option should not have been offered at all in that case, but a quest
+	// that completes while the goods stay in the bag is the worse failure.
+	if (!Opt.ConsumesItem.IsNone() && Opt.ConsumesItemCount > 0)
+	{
+		if (!ConsumeItem(Opt.ConsumesItem, Opt.ConsumesItemCount))
+		{
+			UE_LOG(LogTemp, Warning,
+				TEXT("Millhaven: option '%s' wanted %d x %s but the player has %d."),
+				*Opt.Label, Opt.ConsumesItemCount, *Opt.ConsumesItem.ToString(),
+				GetItemCount(Opt.ConsumesItem));
+			return;
+		}
+	}
+
 	if (!Opt.QuestName.IsEmpty())
 	{
 		// An explicit id lets two NPCs advance the same quest; without one the
 		// display name doubles as the id.
 		const FName Id = Opt.QuestId.IsNone() ? FName(*Opt.QuestName) : Opt.QuestId;
 		StartOrUpdateQuest(Id, Opt.QuestName, Opt.QuestObjective);
+		SetQuestItemGoal(Id, Opt.QuestItem, Opt.QuestItemCount, Opt.bQuestItemAutoCompletes);
 	}
 	if (!Opt.CompletesQuest.IsNone())
 	{
@@ -563,6 +711,17 @@ void AMillhavenCharacter::Tick(float DeltaTime)
 
 	EnforceGroundSafety();
 	UpdateLocationQuests();
+	SweepPickups();
+	UpdateItemQuests();
+
+	if (PickupToastTimer > 0.f)
+	{
+		PickupToastTimer -= DeltaTime;
+		if (PickupToastTimer <= 0.f)
+		{
+			PickupToast.Reset();
+		}
+	}
 
 	const float Speed = (float)GetVelocity().Size2D();
 	if (Speed > 20.f && !IsInDialogue())

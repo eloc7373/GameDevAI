@@ -74,11 +74,14 @@ models in on top (guide near the bottom).
 | Input | Action |
 |---|---|
 | **W A S D** / arrows | Move |
+| **Shift** | Sprint |
 | **Mouse** | Look / rotate camera |
 | **E** | Talk to a nearby NPC |
 | **1–4** | Choose a dialogue option |
 | **Esc** | Close dialogue |
 | **Space** | Jump |
+
+Gatherables are picked up by **walking over them** — there is no collect key.
 
 Walk up to Baker Maren, Farmer Aldric, Elder Sylva or Captain Wren (red dots on
 the minimap) and press **E**.
@@ -398,5 +401,63 @@ rather than committed.
 `check_dialogue.py` parses the trees out of `SpawnNPCs()` and searches the whole quest
 state space. It answers what no single NPC can: **can every quest actually be
 finished**, and is there any reachable state where a node offers the player nothing.
+
+---
+
+## 12. The game loop
+
+Up to this point Millhaven was a village you could walk around and click dialogue in.
+This is the pass that made it a game: **explore → gather → deliver → unlock**.
+
+### Gatherables
+
+`AMillhavenPickup` — a small procedural item that spins and bobs, swept up by walking
+within 1.7m. No collect key, because stopping to press E on each stalk of wheat is not
+fun. Three kinds exist, placed by an explicit table in `MillhavenWorldGen.cpp`:
+
+| Item | Where | Placed | Needed |
+|---|---|---|---|
+| Golden Wheat | Aldric's north field | 8 | 5 |
+| Silverleaf | inside the cave chamber | 5 | 3 |
+| Shellwater Pearl | shallows of the bay | 9 | 6 |
+
+Positions are explicit rather than scattered by PRNG **so they can be checked**:
+`Tools/verify_worldgen.py` asserts wheat is on dry ground, pearls are in water shallow
+enough to wade (there is no swimming), and silverleaf is actually inside the chamber.
+
+### Quests that are played, not clicked
+
+Options can now require and consume items, and quests can carry a gathering goal that
+the HUD shows as a running count.
+
+- **The Everloaf Harvest** — Maren sends you to Aldric; Aldric sends you to the field.
+  Cut five bundles, carry them back. The hand-in option only appears once the fifth is
+  in your satchel.
+- **Silverleaf for Aldric** — only offered *after* you have actually been inside the
+  cave. Three fronds, brought back.
+- **Shellwater Pearls** — only offered after you have been out to the moored boat. Six
+  pearls, and this one completes itself the moment you have them.
+
+Seven quests, all startable and all completable — verified across **3,080 reachable
+states** by `Tools/check_dialogue.py`, which also fails the build if a quest asks for
+more of an item than the world contains.
+
+### Day and night
+
+A full day is 720 real seconds. The sun's elevation drives one blend factor, and sun
+colour and intensity, sky light, fog colour and fog density all hang off it, so there
+is exactly one number to tune. The HUD shows a clock and the phase.
+
+The payoff is Captain Wren's line — *"the cave mouth glows at midnight, blue light, like
+starfire"*. A point light at the mouth is lit by darkness and out by mid-morning, so
+the rumour is literally true if you go and look.
+
+### The cave is a real place
+
+The mouth used to be a facade with a painted-black slab behind it. It now opens into a
+chamber roughly 12m × 11m with rock walls, a roof, glowing crystal clusters, and the
+silverleaf. There is no floor slab: the ground falls about 4.4m across the footprint,
+so the natural terrain *is* the floor and you walk down into it. `verify_worldgen.py`
+checks the roof keeps at least 2.2m of headroom over the highest point of that floor.
 
 Have fun in Millhaven.

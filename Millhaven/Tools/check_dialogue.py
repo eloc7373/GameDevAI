@@ -46,6 +46,13 @@ class Option:
     requires: str = ""
     requires_complete: str = ""
     forbids: str = ""
+    requires_item: str = ""
+    requires_item_count: int = 1
+    consumes_item: str = ""
+    consumes_item_count: int = 0
+    quest_item: str = ""
+    quest_item_count: int = 0
+    quest_item_auto: bool = False
 
     @property
     def starts(self) -> str:
@@ -98,7 +105,17 @@ FIELD_MAP = {
     "RequiresQuest": "requires",
     "RequiresQuestComplete": "requires_complete",
     "ForbidsQuest": "forbids",
+    "RequiresItem": "requires_item",
+    "RequiresItemCount": "requires_item_count",
+    "ConsumesItem": "consumes_item",
+    "ConsumesItemCount": "consumes_item_count",
+    "QuestItem": "quest_item",
+    "QuestItemCount": "quest_item_count",
+    "bQuestItemAutoCompletes": "quest_item_auto",
 }
+
+INT_FIELDS = {"requires_item_count", "consumes_item_count", "quest_item_count"}
+BOOL_FIELDS = {"quest_item_auto"}
 
 
 def parse_one(name: str, chunk: str) -> Npc:
@@ -124,18 +141,25 @@ def parse_one(name: str, chunk: str) -> Npc:
     # literal for FName fields. Matching only the first silently drops every
     # Next and QuestId, which makes the graph look like a pile of dead ends.
     assign = re.compile(
-        r'Opt\.(\w+)\s*=\s*(?:TEXT\(\s*"([^"]*)"\s*\)|"([^"]*)")\s*;')
+        r'Opt\.(\w+)\s*=\s*(?:TEXT\(\s*"([^"]*)"\s*\)|"([^"]*)"|([A-Za-z0-9_.]+))\s*;')
 
     for m in struct.finditer(chunk):
         opt = Option(label="", next="")
         for a in assign.finditer(m.group("assigns")):
             key = a.group(1)
-            raw = a.group(2) if a.group(2) is not None else a.group(3)
+            raw = next(g for g in (a.group(2), a.group(3), a.group(4))
+                       if g is not None)
             attr = FIELD_MAP.get(key, "missing")
             if attr == "missing":
                 raise SystemExit(f"check_dialogue.py: unknown FDlgOption field "
                                  f"'{key}' - teach the parser about it")
-            if attr:
+            if not attr:
+                continue
+            if attr in INT_FIELDS:
+                setattr(opt, attr, int(float(raw)))
+            elif attr in BOOL_FIELDS:
+                setattr(opt, attr, raw.lower() == "true")
+            else:
                 setattr(opt, attr, raw)
 
         # An option that closes the conversation spells it "x". A blank Next
@@ -175,13 +199,30 @@ def parse_code_completed_quests(src: str) -> set[str]:
     return set(re.findall(r'CompleteQuest\(FName\("([^"]+)"\)', src))
 
 
+def parse_gatherables(src: str) -> dict:
+    """How many of each item the world actually contains."""
+    m = re.search(r'GatherableTable\(\)(.*?)\n\t\treturn Defs;', src, re.DOTALL)
+    if not m:
+        return {}
+    counts: dict = {}
+    for item in re.findall(
+            r'\{\s*FVector2D\([^)]*\)\s*,\s*TEXT\("([^"]+)"\)', m.group(1)):
+        counts[item] = counts.get(item, 0) + 1
+    return counts
+
+
 # --- state-space search -----------------------------------------------------
-# A world state is a mapping quest -> 0 absent / 1 active / 2 complete.
+# A world state is (quest -> 0 absent / 1 active / 2 complete, item -> count).
+#
+# Inventory would be unbounded in principle, but gathering is always available
+# and the world holds a fixed number of each item, so "go and pick everything
+# up" is a single transition to the world maximum. That keeps the reachable
+# counts to a handful of values per item.
 
 ABSENT, ACTIVE, DONE = 0, 1, 2
 
 
-def available(opts: list[Option], state: dict) -> list[Option]:
+def available(opts: list[Option], state: dict, bag: dict) -> list[Option]:
     out = []
     for o in opts:
         if o.requires and state.get(o.requires, ABSENT) != ACTIVE:
@@ -190,30 +231,47 @@ def available(opts: list[Option], state: dict) -> list[Option]:
             continue
         if o.forbids and state.get(o.forbids, ABSENT) != ABSENT:
             continue
+        if o.requires_item and bag.get(o.requires_item, 0) < o.requires_item_count:
+            continue
         out.append(o)
     return out
 
 
-def apply(opt: Option, state: dict) -> dict:
+def apply(opt: Option, state: dict, bag: dict):
     nxt = dict(state)
+    nbag = dict(bag)
+
+    # SelectOption() takes payment first and bails if the player is short.
+    if opt.consumes_item and opt.consumes_item_count > 0:
+        if nbag.get(opt.consumes_item, 0) < opt.consumes_item_count:
+            return state, bag
+        nbag[opt.consumes_item] -= opt.consumes_item_count
+
     if opt.starts and nxt.get(opt.starts, ABSENT) == ABSENT:
         nxt[opt.starts] = ACTIVE
     if opt.completes and nxt.get(opt.completes, ABSENT) == ACTIVE:
         nxt[opt.completes] = DONE
-    return nxt
+    return nxt, nbag
 
 
-def explore(npcs: list[Npc], quests: list[str], seed: dict,
-            auto_quests: set[str]):
-    """BFS over global quest states, talking to every NPC in every state."""
-    start = tuple(sorted(seed.items()))
+def explore(npcs: list[Npc], seed: dict, auto_quests: set[str],
+            world_items: dict, item_goals: dict):
+    """BFS over (quest state, inventory), talking to every NPC in every state."""
+    start = (tuple(sorted(seed.items())), ())
     seen = {start}
     frontier = [start]
     empty_nodes: set[tuple[str, str]] = set()
 
+    def push(qs: dict, bag: dict):
+        key = (tuple(sorted(qs.items())),
+               tuple(sorted((k, v) for k, v in bag.items() if v)))
+        if key not in seen:
+            seen.add(key)
+            frontier.append(key)
+
     while frontier:
-        cur = frontier.pop()
-        state = dict(cur)
+        qtup, btup = frontier.pop()
+        state, bag = dict(qtup), dict(btup)
 
         # Arriving somewhere, or striking up a conversation, is always
         # available - so any code-completed quest can finish at any point.
@@ -221,13 +279,24 @@ def explore(npcs: list[Npc], quests: list[str], seed: dict,
             if state.get(q, ABSENT) == ACTIVE:
                 nxt = dict(state)
                 nxt[q] = DONE
-                key = tuple(sorted(nxt.items()))
-                if key not in seen:
-                    seen.add(key)
-                    frontier.append(key)
+                push(nxt, bag)
+
+        # Gathering is always available too: walk out and pick the item up.
+        for item, total in world_items.items():
+            if bag.get(item, 0) < total:
+                nbag = dict(bag)
+                nbag[item] = total
+                push(state, nbag)
+
+        # A gathering quest flagged auto-complete finishes as soon as the
+        # count is met, without being handed in.
+        for q, (item, count, auto) in item_goals.items():
+            if auto and state.get(q, ABSENT) == ACTIVE and bag.get(item, 0) >= count:
+                nxt = dict(state)
+                nxt[q] = DONE
+                push(nxt, bag)
 
         for npc in npcs:
-            # Every conversation starts at "start".
             stack = ["start"]
             walked = set()
             while stack:
@@ -236,18 +305,15 @@ def explore(npcs: list[Npc], quests: list[str], seed: dict,
                     continue
                 walked.add(node)
 
-                opts = available(npc.nodes[node], state)
+                opts = available(npc.nodes[node], state, bag)
                 if not opts:
                     empty_nodes.add((npc.name, node))
                     continue
 
                 for o in opts:
-                    nxt = apply(o, state)
-                    if nxt != state:
-                        key = tuple(sorted(nxt.items()))
-                        if key not in seen:
-                            seen.add(key)
-                            frontier.append(key)
+                    nstate, nbag = apply(o, state, bag)
+                    if nstate != state or nbag != bag:
+                        push(nstate, nbag)
                     if o.next != CLOSE and o.next:
                         stack.append(o.next)
 
@@ -268,9 +334,12 @@ def main() -> int:
     location_quests = parse_location_quests(character)
     seed_quests = parse_seed_quests(character)
     auto_quests = parse_code_completed_quests(character)
+    world_items = parse_gatherables(worldgen)
 
     errors: list[str] = []
     warnings: list[str] = []
+    item_goals: dict = {}
+    item_demand: dict = {}
 
     # --- per-NPC structural checks (mirrors ValidateDialogue) ---------------
     all_quests: set[str] = set(seed_quests) | set(auto_quests) | set(location_quests)
@@ -288,6 +357,14 @@ def main() -> int:
                 for gate in (o.requires, o.requires_complete, o.forbids):
                     if gate:
                         all_quests.add(gate)
+                if o.quest_item and o.quest_item_count > 0 and o.starts:
+                    item_goals[o.starts] = (o.quest_item, o.quest_item_count,
+                                            o.quest_item_auto)
+                for need, count in ((o.requires_item, o.requires_item_count),
+                                    (o.consumes_item, o.consumes_item_count),
+                                    (o.quest_item, o.quest_item_count)):
+                    if need and count > 0:
+                        item_demand[need] = max(item_demand.get(need, 0), count)
                 if o.next in (CLOSE, ""):
                     continue
                 if o.next not in npc.nodes:
@@ -304,12 +381,23 @@ def main() -> int:
 
     # --- reachability over the whole cast ----------------------------------
     seed = {q: (ACTIVE if q in seed_quests else ABSENT) for q in quests}
+    # Every item a quest asks for has to actually exist in the world, or the
+    # chain soft-locks with no way to tell from the dialogue alone.
+    for item, need in sorted(item_demand.items()):
+        have = world_items.get(item, 0)
+        if have < need:
+            errors.append(f"quests need {need} x '{item}' but only {have} are "
+                          f"placed in the world")
+
     # UpdateLocationQuests() completes through a loop variable rather than a
     # literal, so the arrival set has to be unioned in explicitly.
-    states, empty_nodes = explore(npcs, quests, seed, auto_quests | location_quests)
+    states, empty_nodes = explore(npcs, seed, auto_quests | location_quests,
+                                  world_items, item_goals)
 
-    startable = {q for q in quests if any(dict(s).get(q, ABSENT) != ABSENT for s in states)}
-    finishable = {q for q in quests if any(dict(s).get(q) == DONE for s in states)}
+    startable = {q for q in quests
+                 if any(dict(qs).get(q, ABSENT) != ABSENT for qs, _bag in states)}
+    finishable = {q for q in quests
+                  if any(dict(qs).get(q) == DONE for qs, _bag in states)}
 
     for q in quests:
         if q not in startable:
@@ -331,6 +419,11 @@ def main() -> int:
     print(f"  by arrival:   {', '.join(sorted(location_quests)) or '(none)'}")
     other_auto = sorted(auto_quests - location_quests)
     print(f"  by gameplay:  {', '.join(other_auto) or '(none)'}")
+    if world_items:
+        stock = ", ".join(f"{k} x{v}" for k, v in sorted(world_items.items()))
+        print(f"  world items:  {stock}")
+        need = ", ".join(f"{k} x{v}" for k, v in sorted(item_demand.items()))
+        print(f"  quests need:  {need or '(none)'}")
     print(f"  reachable quest states explored: {len(states)}")
     print()
 

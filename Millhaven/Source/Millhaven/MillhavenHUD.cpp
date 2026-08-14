@@ -6,6 +6,7 @@
 #include "Engine/Engine.h"
 #include "Engine/Font.h"
 #include "Engine/World.h"
+#include "EngineUtils.h"
 #include "GameFramework/PlayerController.h"
 
 static const FLinearColor PanelBg(0.05f, 0.03f, 0.01f, 0.82f);
@@ -66,8 +67,11 @@ void AMillhavenHUD::DrawHUD()
 
 	DrawQuestPanel(C);
 	DrawMinimap(C);
+	DrawClock();
+	DrawInventory(C);
 	DrawLocation(C);
 	DrawControls();
+	DrawPickupToast(C);
 
 	if (C->IsInDialogue())
 	{
@@ -77,6 +81,81 @@ void AMillhavenHUD::DrawHUD()
 	{
 		DrawPrompt(C);
 	}
+}
+
+AMillhavenWorldGen* AMillhavenHUD::GetWorldGen()
+{
+	if (WorldGen.IsValid())
+	{
+		return WorldGen.Get();
+	}
+	if (UWorld* W = GetWorld())
+	{
+		for (TActorIterator<AMillhavenWorldGen> It(W); It; ++It)
+		{
+			WorldGen = *It;
+			return *It;
+		}
+	}
+	return nullptr;
+}
+
+void AMillhavenHUD::DrawClock()
+{
+	AMillhavenWorldGen* Gen = GetWorldGen();
+	if (!Gen)
+	{
+		return;
+	}
+	const float Hours = Gen->GetTimeOfDay();
+
+	// Tucked under the minimap, which is top-right.
+	const float W = 150.f;
+	const float X = (float)Canvas->SizeX - W - 24.f, Y = 24.f + 150.f + 8.f;
+	Panel(X, Y, W, 44.f, PanelBg);
+	Text(AMillhavenWorldGen::ClockString(Hours), X + 12.f, Y + 8.f, Gold, 1.15f);
+	Text(AMillhavenWorldGen::PhaseName(Hours), X + 12.f, Y + 27.f, Dim, 0.78f);
+}
+
+void AMillhavenHUD::DrawInventory(AMillhavenCharacter* C)
+{
+	const TMap<FName, int32>& Bag = C->GetInventory();
+	if (Bag.Num() == 0)
+	{
+		return;   // no empty box cluttering the corner before the first pickup
+	}
+
+	const float W = 250.f, RowH = 22.f;
+	const float H = 30.f + RowH * (float)Bag.Num();
+	const float X = 24.f;
+	const float Y = (float)Canvas->SizeY - H - 40.f;
+
+	Panel(X, Y, W, H, PanelBg);
+	Panel(X, Y, W, 3.f, Gold);
+	Text(TEXT("SATCHEL"), X + 12.f, Y + 8.f, Gold, 0.9f);
+
+	float ty = Y + 28.f;
+	for (const TPair<FName, int32>& Pair : Bag)
+	{
+		Text(FString::Printf(TEXT("%s  x%d"), *C->ItemDisplayName(Pair.Key), Pair.Value),
+			X + 14.f, ty, TextCol, 0.85f);
+		ty += RowH;
+	}
+}
+
+void AMillhavenHUD::DrawPickupToast(AMillhavenCharacter* C)
+{
+	if (C->PickupToast.IsEmpty())
+	{
+		return;
+	}
+	const float W = 300.f, H = 34.f;
+	const float X = ((float)Canvas->SizeX - W) * 0.5f;
+	// Sits above the interact prompt so the two never overlap.
+	const float Y = (float)Canvas->SizeY - 210.f;
+	Panel(X, Y, W, H, PanelBg);
+	Panel(X, Y, W, 2.f, DoneCol);
+	Text(C->PickupToast, X + 18.f, Y + 9.f, DoneCol, 0.95f);
 }
 
 void AMillhavenHUD::DrawQuestPanel(AMillhavenCharacter* C)
@@ -98,7 +177,22 @@ void AMillhavenHUD::DrawQuestPanel(AMillhavenCharacter* C)
 			Q.bComplete ? TEXT("[x]") : TEXT("[ ]"), *Q.Name);
 		Text(Head, X + 14.f, ty, Q.bComplete ? DoneCol : TextCol, 1.0f);
 
-		const FString Sub = Q.bComplete ? FString(TEXT("Complete")) : Q.Objective;
+		FString Sub;
+		if (Q.bComplete)
+		{
+			Sub = TEXT("Complete");
+		}
+		else if (!Q.RequiredItem.IsNone() && Q.RequiredCount > 0)
+		{
+			// Gathering quests show a running count - the objective text alone
+			// gives no sense of progress.
+			const int32 Have = FMath::Min(C->GetItemCount(Q.RequiredItem), Q.RequiredCount);
+			Sub = FString::Printf(TEXT("%d / %d  -  %s"), Have, Q.RequiredCount, *Q.Objective);
+		}
+		else
+		{
+			Sub = Q.Objective;
+		}
 		Text(Sub, X + 32.f, ty + 19.f, Dim, 0.8f);
 		ty += RowH;
 	}
@@ -231,9 +325,10 @@ void AMillhavenHUD::DrawLocation(AMillhavenCharacter* C)
 
 void AMillhavenHUD::DrawControls()
 {
-	const float X = (float)Canvas->SizeX - 190.f, Y = (float)Canvas->SizeY - 96.f;
+	const float X = (float)Canvas->SizeX - 190.f, Y = (float)Canvas->SizeY - 114.f;
 	Text(TEXT("WASD  Move"), X, Y, Dim, 0.8f);
-	Text(TEXT("Mouse  Look"), X, Y + 18.f, Dim, 0.8f);
-	Text(TEXT("E  Interact"), X, Y + 36.f, Dim, 0.8f);
-	Text(TEXT("1-4  Choose   Esc  Close"), X - 60.f, Y + 54.f, Dim, 0.8f);
+	Text(TEXT("Shift  Sprint"), X, Y + 18.f, Dim, 0.8f);
+	Text(TEXT("Mouse  Look"), X, Y + 36.f, Dim, 0.8f);
+	Text(TEXT("E  Interact"), X, Y + 54.f, Dim, 0.8f);
+	Text(TEXT("1-4  Choose   Esc  Close"), X - 60.f, Y + 72.f, Dim, 0.8f);
 }

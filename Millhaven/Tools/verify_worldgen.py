@@ -40,6 +40,7 @@ CAVE_MOUTH_M = (-5.0, -36.0)
 DOCK_M = (-25.0, 26.0)
 BAY_WATCH_M = (-20.0, 30.0)
 DOCK_DECK_TOP_CM = 39.0
+CAVE_ROOF_CM = 40.0
 
 # --- mirrored from BuildWater() --------------------------------------------
 WATER_MIN_AX, WATER_MAX_AX = -60.0, -4.0
@@ -252,6 +253,98 @@ def check_location_quests(r: Report) -> None:
         r.note(f"{quest}: {giver} -> target {dist:.1f} m away, radius {radius:.0f} m")
 
 
+def parse_gatherables():
+    """Read the pickup table straight out of MillhavenWorldGen.cpp."""
+    path = os.path.join(SRC, "MillhavenWorldGen.cpp")
+    with open(path, "r", encoding="utf-8") as fh:
+        text = fh.read()
+    rows = re.findall(
+        r'\{\s*FVector2D\(\s*(-?[\d.]+),\s*(-?[\d.]+)\)\s*,\s*TEXT\("([^"]+)"\)',
+        text)
+    return [(float(x), float(y), item) for x, y, item in rows]
+
+
+# Where each kind of gatherable is supposed to be. Rules, not positions - so
+# moving one only has to satisfy the rule, not match a second hardcoded list.
+GATHERABLE_RULES = {
+    # item          must be in water?   extra test
+    "GoldenWheat":     (False, None),
+    "Silverleaf":      (False, "in_cave"),
+    "ShellwaterPearl": (True,  "wadeable"),
+}
+
+# Mirrored from MillhavenWorldGen.h.
+CAVE_MIN_AX, CAVE_MAX_AX = -17.0, -4.5
+CAVE_MIN_AY, CAVE_MAX_AY = -45.5, -34.5
+MAX_WADE_CM = 200.0
+
+
+def check_gatherables(r: Report) -> None:
+    rows = parse_gatherables()
+    r.check(len(rows) > 0, "no gatherables found in MillhavenWorldGen.cpp")
+
+    counts = {}
+    for ax, ay, item in rows:
+        counts[item] = counts.get(item, 0) + 1
+        rule = GATHERABLE_RULES.get(item)
+        if rule is None:
+            r.check(False, f"gatherable '{item}' has no placement rule here")
+            continue
+        wants_water, extra = rule
+
+        wet = is_water_at(ax, ay)
+        if wants_water:
+            r.check(wet, f"{item} at ({ax}, {ay}) should be in the bay but is on land")
+        else:
+            r.check(not wet, f"{item} at ({ax}, {ay}) is under water")
+
+        if extra == "in_cave":
+            inside = (CAVE_MIN_AX <= ax <= CAVE_MAX_AX
+                      and CAVE_MIN_AY <= ay <= CAVE_MAX_AY)
+            r.check(inside, f"{item} at ({ax}, {ay}) is outside the cave chamber")
+        elif extra == "wadeable":
+            # No swimming in this game, so a pearl below wading depth is
+            # unreachable and would soft-lock the quest.
+            depth = WATERLINE_CM - ground(ax, ay)
+            r.check(depth <= MAX_WADE_CM,
+                    f"{item} at ({ax}, {ay}) is {depth:.0f} cm deep - too deep to wade")
+
+    # No two pickups on top of each other: they would be swept up as one.
+    for i in range(len(rows)):
+        for j in range(i + 1, len(rows)):
+            d = math.dist(rows[i][:2], rows[j][:2])
+            r.check(d > 1.0,
+                    f"gatherables at {rows[i][:2]} and {rows[j][:2]} are {d:.1f} m apart")
+
+    r.note("gatherables: " + ", ".join(f"{k} x{v}" for k, v in sorted(counts.items())))
+
+
+def check_cave_chamber(r: Report) -> None:
+    """The roof has to clear the floor, which is the raw terrain in here."""
+    heights = []
+    ax = CAVE_MIN_AX
+    while ax <= CAVE_MAX_AX:
+        ay = CAVE_MIN_AY
+        while ay <= CAVE_MAX_AY:
+            heights.append(ground(ax, ay))
+            ay += 0.5
+        ax += 0.5
+
+    highest, lowest = max(heights), min(heights)
+    headroom = CAVE_ROOF_CM - highest
+    r.check(headroom > 220.0,
+            f"only {headroom:.0f} cm of headroom at the high end of the cave "
+            f"(roof {CAVE_ROOF_CM:.0f}, floor peaks at {highest:.0f})")
+
+    # And the doorway has to be walkable from the mouth outside.
+    mouth = ground(*CAVE_MOUTH_M)
+    r.check(abs(mouth - ground(CAVE_MAX_AX, -36.0)) < MAX_STEP_CM,
+            "stepping through the cave doorway is more than one step height")
+
+    r.note(f"cave floor {lowest:.0f}..{highest:.0f} cm, roof {CAVE_ROOF_CM:.0f} cm, "
+           f"{headroom:.0f} cm headroom at the tightest point")
+
+
 def check_constants_match_cpp(r: Report) -> None:
     """Catch this file drifting away from the C++ it mirrors."""
     header = os.path.join(SRC, "MillhavenWorldGen.h")
@@ -263,7 +356,8 @@ def check_constants_match_cpp(r: Report) -> None:
         return
 
     for name, expected in (("WaterlineCm", WATERLINE_CM),
-                           ("MinWaterDepthCm", MIN_WATER_DEPTH_CM)):
+                           ("MinWaterDepthCm", MIN_WATER_DEPTH_CM),
+                           ("CaveRoofCm", CAVE_ROOF_CM)):
         m = re.search(r'constexpr\s+float\s+%s\s*=\s*([0-9.]+)f' % name, text)
         if not r.check(m is not None, f"{name} not found in MillhavenWorldGen.h"):
             continue
@@ -297,6 +391,8 @@ def main() -> int:
     check_water(r)
     check_dock_and_boardwalk(r)
     check_location_quests(r)
+    check_gatherables(r)
+    check_cave_chamber(r)
 
     for n in r.notes:
         print("  ok   %s" % n)

@@ -1,5 +1,6 @@
 #include "MillhavenWorldGen.h"
 #include "MillhavenNPC.h"
+#include "MillhavenPickup.h"
 
 #include "ProceduralMeshComponent.h"
 #include "Components/SceneComponent.h"
@@ -7,6 +8,7 @@
 #include "Components/SkyLightComponent.h"
 #include "Components/SkyAtmosphereComponent.h"
 #include "Components/ExponentialHeightFogComponent.h"
+#include "Components/PointLightComponent.h"
 #include "Engine/World.h"
 #include "Materials/MaterialInterface.h"
 #include "Materials/Material.h"
@@ -53,6 +55,14 @@ AMillhavenWorldGen::AMillhavenWorldGen()
 
 	Fog = CreateDefaultSubobject<UExponentialHeightFogComponent>(TEXT("HeightFog"));
 	Fog->SetupAttachment(SceneRoot);
+
+	CaveGlow = CreateDefaultSubobject<UPointLightComponent>(TEXT("CaveGlow"));
+	CaveGlow->SetupAttachment(SceneRoot);
+	CaveGlow->SetMobility(EComponentMobility::Movable);
+	CaveGlow->SetLightColor(FLinearColor(0.32f, 0.62f, 1.0f));
+	CaveGlow->SetAttenuationRadius(2600.f);
+	CaveGlow->SetIntensity(0.f);          // lit by UpdateDayNight after dark
+	CaveGlow->SetCastShadows(false);
 }
 
 // ---------------------------------------------------------------------------
@@ -241,6 +251,76 @@ void AMillhavenWorldGen::BuildWorld()
 	BuildClouds();
 
 	SpawnNPCs();
+	SpawnPickups();
+}
+
+// ---------------------------------------------------------------------------
+// Time of day
+// ---------------------------------------------------------------------------
+FString AMillhavenWorldGen::ClockString(float Hours)
+{
+	const int32 H = FMath::Clamp(FMath::FloorToInt(Hours), 0, 23);
+	const int32 M = FMath::Clamp(FMath::FloorToInt((Hours - (float)H) * 60.f), 0, 59);
+	return FString::Printf(TEXT("%02d:%02d"), H, M);
+}
+
+FString AMillhavenWorldGen::PhaseName(float Hours)
+{
+	if (Hours < 5.f)  return TEXT("Deep Night");
+	if (Hours < 7.f)  return TEXT("Dawn");
+	if (Hours < 12.f) return TEXT("Morning");
+	if (Hours < 17.f) return TEXT("Afternoon");
+	if (Hours < 19.f) return TEXT("Golden Hour");
+	if (Hours < 21.f) return TEXT("Dusk");
+	return TEXT("Night");
+}
+
+void AMillhavenWorldGen::UpdateDayNight(float DeltaTime)
+{
+	TimeOfDay += (DeltaTime / DayLengthSeconds) * 24.f;
+	while (TimeOfDay >= 24.f)
+	{
+		TimeOfDay -= 24.f;
+	}
+
+	// Elevation follows a sine from sunrise at 06:00 to sunset at 18:00, and
+	// keeps going negative through the night so nothing has to special-case
+	// the transition.
+	const float DayT = (TimeOfDay - 6.f) / 12.f;
+	const float Elevation = FMath::Sin(DayT * PI) * 75.f;
+	const float Yaw = -20.f - DayT * 140.f;
+
+	// 0 at the horizon, 1 at full daylight - the blend that drives everything.
+	const float Daylight = FMath::Clamp(Elevation / 22.f, 0.f, 1.f);
+	// Separate warmth term so dawn and dusk stay orange while the sun is low.
+	const float Warmth = 1.f - FMath::Clamp(Elevation / 45.f, 0.f, 1.f);
+
+	if (Sun)
+	{
+		Sun->SetWorldRotation(FRotator(-Elevation, Yaw, 0.f));
+
+		const FLinearColor Warm(1.0f, 0.66f, 0.36f);
+		const FLinearColor Noon(1.0f, 0.95f, 0.86f);
+		Sun->SetLightColor(FMath::Lerp(Noon, Warm, Warmth));
+		Sun->SetIntensity(FMath::Lerp(0.02f, 9.0f, Daylight));
+	}
+	if (Sky)
+	{
+		Sky->SetIntensity(FMath::Lerp(0.14f, 0.65f, Daylight));
+	}
+	if (Fog)
+	{
+		const FLinearColor NightFog(0.05f, 0.07f, 0.15f);
+		const FLinearColor DayFog(0.55f, 0.64f, 0.76f);
+		Fog->SetFogInscatteringColor(FMath::Lerp(NightFog, DayFog, Daylight));
+		Fog->SetFogDensity(FMath::Lerp(0.010f, 0.004f, Daylight));
+	}
+	if (CaveGlow)
+	{
+		// Brightest in the small hours, out by mid-morning. This is the payoff
+		// for Wren's line about the mouth glowing at midnight.
+		CaveGlow->SetIntensity(FMath::Lerp(48000.f, 0.f, Daylight));
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -256,9 +336,6 @@ void AMillhavenWorldGen::BuildEnvironmentLighting()
 	// out so near geometry reads its true colour.
 	if (Sun)
 	{
-		Sun->SetWorldRotation(FRotator(-38.f, -55.f, 0.f)); // low, warm angle
-		Sun->SetLightColor(FLinearColor(1.0f, 0.82f, 0.55f));
-		Sun->SetIntensity(9.0f);         // was 6.0
 		Sun->SetCastShadows(true);
 	}
 	if (Atmosphere)
@@ -269,15 +346,21 @@ void AMillhavenWorldGen::BuildEnvironmentLighting()
 	{
 		Sky->SetMobility(EComponentMobility::Movable);
 		Sky->SetRealTimeCapture(true);   // works with SkyAtmosphere, no baking
-		Sky->SetIntensity(0.65f);        // was 1.0
 		Sky->RecaptureSky();
 	}
 	if (Fog)
 	{
-		Fog->SetFogDensity(0.004f);      // was 0.008
 		Fog->SetStartDistance(2500.f);   // 25m - was 0, i.e. fog on the player's feet
-		Fog->SetFogInscatteringColor(FLinearColor(0.55f, 0.64f, 0.76f));
 	}
+	if (CaveGlow)
+	{
+		const FVector2D CaveAt = CaveMouthM();
+		CaveGlow->SetWorldLocation(GroundPos((float)CaveAt.X, (float)CaveAt.Y, 220.f));
+	}
+
+	// Sun angle, colours, fog density and the cave glow are all functions of
+	// the clock, so set them from it once rather than duplicating the values.
+	UpdateDayNight(0.f);
 }
 
 // ---------------------------------------------------------------------------
@@ -546,6 +629,10 @@ void AMillhavenWorldGen::BuildStructures()
 		}
 	}
 
+	// The chamber behind the mouth. Part of the solid mesh, so its walls and
+	// roof are collidable and the player can actually go inside.
+	BuildCaveChamber();
+
 	// Fences
 	AddFenceRun({ {2.5, 1.0}, {2.5, 9.0}, {11.0, 9.0}, {11.0, 1.0} });
 	AddFenceRun({ {-14.0, -1.0}, {-14.0, 9.0}, {-10.0, 9.0} });
@@ -561,6 +648,69 @@ void AMillhavenWorldGen::BuildStructures()
 		B(FColor(128,120,104)).AddBox(GroundPos(rx, ry, sc * 0.3f),
 			FVector(sc, sc, sc), Prng(i * 5.f) * 90.f);
 	}
+}
+
+// ---------------------------------------------------------------------------
+// The cave interior - walls and a roof over the natural terrain, so the floor
+// is the real (sloping) ground and nothing has to be carved out of it.
+// ---------------------------------------------------------------------------
+void AMillhavenWorldGen::BuildCaveChamber()
+{
+	const FColor Rock(88, 96, 82);
+	const FColor RockDark(64, 70, 60);
+
+	const double FloorZ = -740.0;                  // below the lowest ground here
+	const double RoofZ  = (double)CaveRoofCm;
+	const double WallH  = RoofZ - FloorZ;
+	const double WallMidZ = (RoofZ + FloorZ) * 0.5;
+	const double Thick = 160.0;
+
+	// A wall from one design-metre point to another, full height.
+	auto Wall = [&](float AX0, float AY0, float AX1, float AY1)
+	{
+		const double MidX = (AX0 + AX1) * 0.5 * 100.0;
+		const double MidY = (AY0 + AY1) * 0.5 * 100.0;
+		const double LenX = FMath::Abs(AX1 - AX0) * 100.0 + Thick;
+		const double LenY = FMath::Abs(AY1 - AY0) * 100.0 + Thick;
+		B(Rock).AddBox(FVector(MidX, MidY, WallMidZ),
+			FVector(FMath::Max(LenX, Thick), FMath::Max(LenY, Thick), WallH));
+	};
+
+	Wall(CaveMinAX, CaveMinAY, CaveMaxAX, CaveMinAY);   // north
+	Wall(CaveMinAX, CaveMaxAY, CaveMaxAX, CaveMaxAY);   // south
+	Wall(CaveMinAX, CaveMinAY, CaveMinAX, CaveMaxAY);   // west (back)
+	// East wall, stopping short of the doorway that lines up with the mouth.
+	Wall(CaveMaxAX, CaveMinAY, CaveMaxAX, CaveDoorMinAY);
+
+	// Roof slab, overhanging so no seam shows at the wall tops.
+	{
+		const double MidX = (CaveMinAX + CaveMaxAX) * 0.5 * 100.0;
+		const double MidY = (CaveMinAY + CaveMaxAY) * 0.5 * 100.0;
+		const double SpanX = (CaveMaxAX - CaveMinAX) * 100.0 + Thick * 2.0;
+		const double SpanY = (CaveMaxAY - CaveMinAY) * 100.0 + Thick * 2.0;
+		B(RockDark).AddBox(FVector(MidX, MidY, RoofZ + 90.0), FVector(SpanX, SpanY, 180.0));
+	}
+
+	// Glowing crystal clusters. These are decoration, but they are also the
+	// only light source in here once you are past the doorway.
+	const FColor Glow(120, 210, 255);
+	const FVector2D Clusters[] = {
+		FVector2D(-14.0, -37.0), FVector2D(-15.5, -43.0), FVector2D(-8.5, -44.0),
+		FVector2D(-11.0, -39.5), FVector2D(-6.5, -41.5),
+	};
+	for (int32 i = 0; i < UE_ARRAY_COUNT(Clusters); i++)
+	{
+		const FVector Base = GroundPos((float)Clusters[i].X, (float)Clusters[i].Y, 0.f);
+		for (int32 k = 0; k < 3; k++)
+		{
+			const float A = Prng(i * 23.f + k * 7.f) * 2.f * PI;
+			const double OX = FMath::Cos(A) * 55.0;
+			const double OY = FMath::Sin(A) * 55.0;
+			const float H = 70.f + Prng(i * 13.f + k * 5.f) * 90.f;
+			B(Glow).AddCone(Base + FVector(OX, OY, 0.0), 22.f, H, 5, A * 30.f);
+		}
+	}
+
 }
 
 // ---------------------------------------------------------------------------
@@ -759,6 +909,92 @@ void AMillhavenWorldGen::BuildClouds()
 }
 
 // ---------------------------------------------------------------------------
+// Gatherables
+//
+// Explicit positions rather than a scattering PRNG, so Tools/verify_worldgen.py
+// can check every one against the terrain: wheat must be on dry ground, pearls
+// must be in water shallow enough to wade, silverleaf must be inside the cave
+// chamber. A generated scatter could not be checked that way.
+// ---------------------------------------------------------------------------
+namespace
+{
+	struct FGatherableDef
+	{
+		FVector2D At;                 // design metres
+		const TCHAR* ItemId;
+		const TCHAR* DisplayName;
+		EMillhavenPickupShape Shape;
+		FColor Tint;
+		float LiftCm;
+	};
+
+	const TArray<FGatherableDef>& GatherableTable()
+	{
+		static const TArray<FGatherableDef> Defs = {
+			// Golden wheat - Aldric's north field. Five are needed; eight grow.
+			{ FVector2D( 14.5, -17.0), TEXT("GoldenWheat"), TEXT("Golden Wheat"), EMillhavenPickupShape::Sheaf, FColor(226, 186, 68), 0.f },
+			{ FVector2D( 13.2, -13.8), TEXT("GoldenWheat"), TEXT("Golden Wheat"), EMillhavenPickupShape::Sheaf, FColor(226, 186, 68), 0.f },
+			{ FVector2D( 10.0, -12.5), TEXT("GoldenWheat"), TEXT("Golden Wheat"), EMillhavenPickupShape::Sheaf, FColor(226, 186, 68), 0.f },
+			{ FVector2D(  6.8, -13.8), TEXT("GoldenWheat"), TEXT("Golden Wheat"), EMillhavenPickupShape::Sheaf, FColor(226, 186, 68), 0.f },
+			{ FVector2D(  5.5, -17.0), TEXT("GoldenWheat"), TEXT("Golden Wheat"), EMillhavenPickupShape::Sheaf, FColor(226, 186, 68), 0.f },
+			{ FVector2D(  6.8, -20.2), TEXT("GoldenWheat"), TEXT("Golden Wheat"), EMillhavenPickupShape::Sheaf, FColor(226, 186, 68), 0.f },
+			{ FVector2D( 10.0, -21.5), TEXT("GoldenWheat"), TEXT("Golden Wheat"), EMillhavenPickupShape::Sheaf, FColor(226, 186, 68), 0.f },
+			{ FVector2D( 13.2, -20.2), TEXT("GoldenWheat"), TEXT("Golden Wheat"), EMillhavenPickupShape::Sheaf, FColor(226, 186, 68), 0.f },
+
+			// Silverleaf - inside the cave chamber. Three are needed; five grow.
+			{ FVector2D( -8.0, -38.0), TEXT("Silverleaf"), TEXT("Silverleaf"), EMillhavenPickupShape::Leaf, FColor(196, 226, 214), 0.f },
+			{ FVector2D(-11.0, -41.0), TEXT("Silverleaf"), TEXT("Silverleaf"), EMillhavenPickupShape::Leaf, FColor(196, 226, 214), 0.f },
+			{ FVector2D(-14.0, -38.0), TEXT("Silverleaf"), TEXT("Silverleaf"), EMillhavenPickupShape::Leaf, FColor(196, 226, 214), 0.f },
+			{ FVector2D( -9.0, -43.0), TEXT("Silverleaf"), TEXT("Silverleaf"), EMillhavenPickupShape::Leaf, FColor(196, 226, 214), 0.f },
+			{ FVector2D(-13.0, -43.5), TEXT("Silverleaf"), TEXT("Silverleaf"), EMillhavenPickupShape::Leaf, FColor(196, 226, 214), 0.f },
+
+			// Shellwater pearls - shallow bay. Six are needed; nine lie there.
+			{ FVector2D(-45.5,  20.0), TEXT("ShellwaterPearl"), TEXT("Shellwater Pearl"), EMillhavenPickupShape::Pearl, FColor(240, 236, 246), 12.f },
+			{ FVector2D(-40.2,  26.0), TEXT("ShellwaterPearl"), TEXT("Shellwater Pearl"), EMillhavenPickupShape::Pearl, FColor(240, 236, 246), 12.f },
+			{ FVector2D(-36.2,  28.2), TEXT("ShellwaterPearl"), TEXT("Shellwater Pearl"), EMillhavenPickupShape::Pearl, FColor(240, 236, 246), 12.f },
+			{ FVector2D(-32.8,  11.8), TEXT("ShellwaterPearl"), TEXT("Shellwater Pearl"), EMillhavenPickupShape::Pearl, FColor(240, 236, 246), 12.f },
+			{ FVector2D(-29.5,  36.2), TEXT("ShellwaterPearl"), TEXT("Shellwater Pearl"), EMillhavenPickupShape::Pearl, FColor(240, 236, 246), 12.f },
+			{ FVector2D(-26.2,  17.5), TEXT("ShellwaterPearl"), TEXT("Shellwater Pearl"), EMillhavenPickupShape::Pearl, FColor(240, 236, 246), 12.f },
+			{ FVector2D(-23.5,  21.8), TEXT("ShellwaterPearl"), TEXT("Shellwater Pearl"), EMillhavenPickupShape::Pearl, FColor(240, 236, 246), 12.f },
+			{ FVector2D(-19.8,  38.5), TEXT("ShellwaterPearl"), TEXT("Shellwater Pearl"), EMillhavenPickupShape::Pearl, FColor(240, 236, 246), 12.f },
+			{ FVector2D(-50.0,  18.2), TEXT("ShellwaterPearl"), TEXT("Shellwater Pearl"), EMillhavenPickupShape::Pearl, FColor(240, 236, 246), 12.f },
+		};
+		return Defs;
+	}
+}
+
+void AMillhavenWorldGen::SpawnPickups()
+{
+	UWorld* W = GetWorld();
+	if (!W)
+	{
+		return;
+	}
+
+	int32 Spawned = 0;
+	for (const FGatherableDef& Def : GatherableTable())
+	{
+		FActorSpawnParameters P;
+		P.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+		P.Owner = this;
+
+		const FVector Loc = GroundPos((float)Def.At.X, (float)Def.At.Y, Def.LiftCm);
+		AMillhavenPickup* Item = W->SpawnActor<AMillhavenPickup>(
+			AMillhavenPickup::StaticClass(), Loc, FRotator::ZeroRotator, P);
+		if (!Item)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("Millhaven: failed to spawn pickup '%s'."),
+				Def.DisplayName);
+			continue;
+		}
+		Item->Init(FName(Def.ItemId), FString(Def.DisplayName), Def.Shape, Def.Tint);
+		Spawned++;
+	}
+
+	UE_LOG(LogTemp, Log, TEXT("Millhaven: %d gatherables placed."), Spawned);
+}
+
+// ---------------------------------------------------------------------------
 // NPCs + dialogue trees
 // ---------------------------------------------------------------------------
 void AMillhavenWorldGen::SpawnNPCs()
@@ -820,12 +1056,14 @@ void AMillhavenWorldGen::SpawnNPCs()
 		// option above has been used up. Every gated node needs one of these.
 		N->AddOption("accept", TEXT("Goodbye, Maren."), "x");
 
-		// The return leg: only offered once Aldric has sent you back.
+		// The hand-in. Gated on the goods themselves rather than on quest
+		// state, so it appears the moment the fifth bundle goes in the bag.
 		{
 			FDlgOption Opt;
-			Opt.Label = TEXT("I have your golden wheat.");
+			Opt.Label = TEXT("I have your five bundles of golden wheat.");
 			Opt.Next = "delivered";
-			Opt.RequiresQuest = "DeliverWheat";
+			Opt.RequiresItem = "GoldenWheat";
+			Opt.RequiresItemCount = 5;
 			N->AddOption("start", Opt);
 		}
 		N->AddNode("delivered", TEXT("Five bundles, and every stalk gold as a summer evening! Bless you, traveler. The Everloaf will rise higher than the chapel door this year - and the first slice is yours."));
@@ -833,7 +1071,9 @@ void AMillhavenWorldGen::SpawnNPCs()
 			FDlgOption Opt;
 			Opt.Label = TEXT("Happy to help. Enjoy the festival!");
 			Opt.Next = "x";
-			Opt.CompletesQuest = "DeliverWheat";
+			Opt.ConsumesItem = "GoldenWheat";
+			Opt.ConsumesItemCount = 5;
+			Opt.CompletesQuest = "GatherWheat";
 			N->AddOption("delivered", Opt);
 		}
 	}
@@ -854,18 +1094,62 @@ void AMillhavenWorldGen::SpawnNPCs()
 		N->AddOption("start", TEXT("Tell me about your farm."), "farm");
 		N->AddOption("start", TEXT("Just exploring. Goodbye!"), "x");
 
-		N->AddNode("wheat", TEXT("Ah - for the festival! My golden wheat is ready and waiting. Here - five bundles, cut this morning and still warm. Take them straight back to Maren before the dew lifts."));
+		N->AddNode("wheat", TEXT("Ah - for the festival! I've no hands to spare, but the north field's thick with it. Cut five bundles yourself - the tallest stalks, the ones that catch the light - and run them straight to Maren."));
 		{
 			// Hands the first quest off to the second, so the pair reads as one
-			// errand across two NPCs.
+			// errand across two NPCs - and the second one is actual gathering.
 			FDlgOption Opt;
-			Opt.Label = TEXT("Thank you, Aldric!");
+			Opt.Label = TEXT("Five bundles. I'll go and cut them.");
 			Opt.Next = "x";
 			Opt.CompletesQuest = "GetWheat";
-			Opt.QuestId = "DeliverWheat";
-			Opt.QuestName = TEXT("Deliver the Wheat");
-			Opt.QuestObjective = TEXT("Bring the golden wheat back to Baker Maren");
+			Opt.QuestId = "GatherWheat";
+			Opt.QuestName = TEXT("The Everloaf Harvest");
+			Opt.QuestObjective = TEXT("Gather 5 golden wheat from the north field, then take it to Baker Maren");
+			Opt.QuestItem = "GoldenWheat";
+			Opt.QuestItemCount = 5;
+			Opt.bQuestItemAutoCompletes = false;   // finished by handing it in
 			N->AddOption("wheat", Opt);
+		}
+
+		// --- Silverleaf: unlocked by having actually found the cave ---
+		{
+			FDlgOption Opt;
+			Opt.Label = TEXT("I found the cave you mentioned.");
+			Opt.Next = "silverleaf";
+			Opt.RequiresQuestComplete = "GlowingDeep";
+			Opt.ForbidsQuest = "Silverleaf";
+			N->AddOption("start", Opt);
+		}
+		N->AddNode("silverleaf", TEXT("You went in? Braver than me by a mile. Then you'll have seen the silverleaf - pale fronds, they catch what light there is. Three would set my wife's cough right for a winter. I'd pay honestly for them."));
+		{
+			FDlgOption Opt;
+			Opt.Label = TEXT("I'll bring you three.");
+			Opt.Next = "x";
+			Opt.QuestId = "Silverleaf";
+			Opt.QuestName = TEXT("Silverleaf for Aldric");
+			Opt.QuestObjective = TEXT("Gather 3 silverleaf from inside the cave, then return to Farmer Aldric");
+			Opt.QuestItem = "Silverleaf";
+			Opt.QuestItemCount = 3;
+			N->AddOption("silverleaf", Opt);
+		}
+		N->AddOption("silverleaf", TEXT("Maybe another time."), "x");
+		{
+			FDlgOption Opt;
+			Opt.Label = TEXT("Here - three silverleaf, straight from the dark.");
+			Opt.Next = "leafdone";
+			Opt.RequiresItem = "Silverleaf";
+			Opt.RequiresItemCount = 3;
+			N->AddOption("start", Opt);
+		}
+		N->AddNode("leafdone", TEXT("Well I never. Still cold from down there. That's a kindness I won't forget, traveler - and there's a bushel of moonmelons with your name on it come autumn."));
+		{
+			FDlgOption Opt;
+			Opt.Label = TEXT("Glad to help, Aldric.");
+			Opt.Next = "x";
+			Opt.ConsumesItem = "Silverleaf";
+			Opt.ConsumesItemCount = 3;
+			Opt.CompletesQuest = "Silverleaf";
+			N->AddOption("leafdone", Opt);
 		}
 
 		N->AddNode("farm", TEXT("Twenty-two years on this land. Wheat, barley, pumpkins - and the finest moonmelons in the valley grow near the old creek. Soil here's rich as midnight."));
@@ -938,8 +1222,51 @@ void AMillhavenWorldGen::SpawnNPCs()
 			N->AddOption("fish", Opt);
 		}
 
-		N->AddNode("cave", TEXT("The cave mouth glows at midnight. Blue light, like starfire. Elder Sylva says it's safe if you follow the moss-lights. I say let sleeping wolves lie."));
+		N->AddNode("cave", TEXT("The cave mouth glows at midnight. Blue light, like starfire - go and stand on the north road after dark and you'll see it yourself. Elder Sylva says it's safe if you follow the moss-lights. I say let sleeping wolves lie."));
 		N->AddOption("cave", TEXT("Good advice. Goodbye."), "x");
+
+		// --- Pearl diving: opens once the bay has actually been investigated ---
+		{
+			FDlgOption Opt;
+			Opt.Label = TEXT("I went out to your boat. The water's full of shells.");
+			Opt.Next = "pearls";
+			Opt.RequiresQuestComplete = "BayTrouble";
+			Opt.ForbidsQuest = "PearlDiver";
+			N->AddOption("start", Opt);
+		}
+		N->AddNode("pearls", TEXT("Shells? Ha! Not shells - shellwater pearls. They only rise when something big stirs the bed, which explains the fish clearing out. Bring me six and I'll call us square for the fright."));
+		{
+			FDlgOption Opt;
+			Opt.Label = TEXT("Six pearls. I'll wade for them.");
+			Opt.Next = "x";
+			Opt.QuestId = "PearlDiver";
+			Opt.QuestName = TEXT("Shellwater Pearls");
+			Opt.QuestObjective = TEXT("Find 6 shellwater pearls in the shallows of the bay");
+			Opt.QuestItem = "ShellwaterPearl";
+			Opt.QuestItemCount = 6;
+			// Finding them is the whole task, so this one finishes itself.
+			Opt.bQuestItemAutoCompletes = true;
+			N->AddOption("pearls", Opt);
+		}
+		N->AddOption("pearls", TEXT("Cold water. Maybe later."), "x");
+		{
+			FDlgOption Opt;
+			Opt.Label = TEXT("Six pearls, as promised.");
+			Opt.Next = "pearlsdone";
+			Opt.RequiresQuestComplete = "PearlDiver";
+			Opt.RequiresItem = "ShellwaterPearl";
+			Opt.RequiresItemCount = 6;
+			N->AddOption("start", Opt);
+		}
+		N->AddNode("pearlsdone", TEXT("Would you look at that. Six, and not a one cracked. The harbour owes you, traveler - any boat on this water will carry you free from here on."));
+		{
+			FDlgOption Opt;
+			Opt.Label = TEXT("Fair winds, Captain.");
+			Opt.Next = "x";
+			Opt.ConsumesItem = "ShellwaterPearl";
+			Opt.ConsumesItemCount = 6;
+			N->AddOption("pearlsdone", Opt);
+		}
 	}
 
 	// Every tree is complete now, so dangling targets and unreachable nodes
@@ -955,6 +1282,8 @@ void AMillhavenWorldGen::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
 	TimeAccum += DeltaTime;
+
+	UpdateDayNight(DeltaTime);
 
 	if (WaterMesh)
 	{

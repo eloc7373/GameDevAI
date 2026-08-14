@@ -5,6 +5,7 @@
 #include "MillhavenHUD.generated.h"
 
 class AMillhavenCharacter;
+class AMillhavenWorldGen;
 
 /**
  * Canvas-drawn HUD (no UMG assets): quest panel, minimap, interaction prompt,
@@ -24,7 +25,14 @@ private:
 	void DrawPrompt(AMillhavenCharacter* C);
 	void DrawDialogue(AMillhavenCharacter* C);
 	void DrawLocation(AMillhavenCharacter* C);
+	void DrawInventory(AMillhavenCharacter* C);
+	void DrawPickupToast(AMillhavenCharacter* C);
+	void DrawClock();
 	void DrawControls();
+
+	/** The world generator, found once and cached - it owns the clock. */
+	TWeakObjectPtr<AMillhavenWorldGen> WorldGen;
+	AMillhavenWorldGen* GetWorldGen();
 
 	void Panel(float X, float Y, float W, float H, const FLinearColor& Col);
 	void Text(const FString& S, float X, float Y, const FLinearColor& Col, float Scale = 1.f);
